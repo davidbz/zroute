@@ -16,11 +16,14 @@
   ],
   "postCreateCommand": "zig version",
   "remoteUser": "vscode",
-  "runArgs": [
-    "--cap-add=SYS_PTRACE",
-    "--security-opt",
-    "seccomp=unconfined",
-    "--cap-add=SYS_ADMIN"
+  "capAdd": [
+    "SYS_PTRACE"
+  ],
+  "securityOpt": [
+    "seccomp=unconfined"
+  ],
+  "mounts": [
+    "source=code-bashhistory,target=/commandhistory,type=volume"
   ],
   "containerEnv": {
     "ZIG_DEBUGGER": "lldb"

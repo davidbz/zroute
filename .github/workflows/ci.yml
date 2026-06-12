@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same PR/branch; never cancel on main.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Minimum required permissions; jobs that need more declare it explicitly.
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - name: Check formatting
+        run: zig fmt --check src/
+
+  test:
+    name: Test / ${{ matrix.os }} / Zig ${{ matrix.zig }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false   # Report all failures, not just the first one
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        zig: ["0.16.0", "master"]   # master catches upstream breakage early
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig }}
+      # Cache the Zig build cache to speed up incremental builds.
+      # Key includes the zon hash so a dep change busts it correctly.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+            ~/Library/Caches/zig
+          key: zig-${{ runner.os }}-${{ matrix.zig }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-${{ runner.os }}-${{ matrix.zig }}-
+            zig-${{ runner.os }}-
+      - name: Compile check
+        run: zig build check
+      - name: Run tests
+        run: zig build test
+
+  fuzz:
+    name: Fuzz / smoke (30s)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      # Run the fuzzer for 30 seconds. The || block fires on any non-zero exit;
+      # code 124 means timeout killed it (expected), anything else is a real crash.
+      # Using || instead of set +e keeps bash errexit active for all other steps.
+      - name: Fuzz smoke test
+        run: |
+          timeout 30 zig build test --fuzz || {
+            rc=$?
+            [ $rc -eq 124 ] || exit $rc
+          }

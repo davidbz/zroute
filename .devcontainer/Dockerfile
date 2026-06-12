@@ -1,6 +1,8 @@
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG en_US.utf8
+ARG USERNAME=vscode
 
 RUN apt-get update && apt-get install -y \
     curl \
@@ -11,13 +13,20 @@ RUN apt-get update && apt-get install -y \
     lldb \
     strace \
     ltrace \
-    procps \
-    linux-tools-common \
-    linux-tools-generic \
-    && rm -rf /var/lib/apt/lists/*
+    bash-completion && \
+    apt-get autoremove -y && \
+    apt-get clean autoclean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Persist bash history.
+RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
+    && mkdir /commandhistory \
+    && touch /commandhistory/.bash_history \
+    && chown -R $USERNAME /commandhistory
+
+RUN echo 'source /usr/share/bash-completion/bash_completion' >> /home/vscode/.bashrc
 
 ARG ZIG_VERSION=0.16.0
-
 RUN ARCH=$(uname -m) && \
     curl -fL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ARCH}-linux-${ZIG_VERSION}.tar.xz" \
     -o /tmp/zig.tar.xz \
