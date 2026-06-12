@@ -11,6 +11,9 @@
       ]
     }
   },
+  "mounts": [
+    "source=zroute-zig-cache,target=${containerWorkspaceFolder}/.zig-cache,type=volume"
+  ],
   "postCreateCommand": "zig version",
   "remoteUser": "vscode",
   "capAdd": [
