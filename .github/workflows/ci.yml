@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false   # Report all failures, not just the first one
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-latest]
         zig: ["0.16.0", "master"]   # master catches upstream breakage early
     steps:
       - uses: actions/checkout@v4
