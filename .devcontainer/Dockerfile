@@ -20,10 +20,10 @@ ARG ZIG_VERSION=0.16.0
 
 # Install Zig — arch-agnostic so this works on x86_64 and aarch64 hosts
 RUN ARCH=$(uname -m) && \
-    curl -fL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ARCH}-${ZIG_VERSION}.tar.xz" \
+    curl -fL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ARCH}-linux-${ZIG_VERSION}.tar.xz" \
     -o /tmp/zig.tar.xz \
     && tar xf /tmp/zig.tar.xz -C /opt \
-    && mv "/opt/zig-linux-${ARCH}-${ZIG_VERSION}" /opt/zig \
+    && mv "/opt/zig-${ARCH}-linux-${ZIG_VERSION}" /opt/zig \
     && ln -s /opt/zig/zig /usr/local/bin/zig \
     && rm /tmp/zig.tar.xz
 
