@@ -7,13 +7,12 @@
     "vscode": {
       "extensions": [
         "ziglang.vscode-zig",
-        "vadimcn.vscode-lldb"
+        "vadimcn.vscode-lldb",
+        "donjayamanne.githistory",
+        "GitHub.vscode-pull-request-github"
       ]
     }
   },
-  "mounts": [
-    "source=zroute-zig-cache,target=${containerWorkspaceFolder}/.zig-cache,type=volume"
-  ],
   "postCreateCommand": "zig version",
   "remoteUser": "vscode",
   "capAdd": [
