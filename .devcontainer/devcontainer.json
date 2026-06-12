@@ -14,7 +14,7 @@
   "mounts": [
     "source=zroute-zig-cache,target=${containerWorkspaceFolder}/.zig-cache,type=volume"
   ],
-  "postCreateCommand": "zig version && zig build check",
+  "postCreateCommand": "zig version",
   "remoteUser": "vscode",
   "runArgs": [
     "--cap-add=SYS_PTRACE",

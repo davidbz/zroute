@@ -18,7 +18,6 @@ RUN apt-get update && apt-get install -y \
 
 ARG ZIG_VERSION=0.16.0
 
-# Install Zig — arch-agnostic so this works on x86_64 and aarch64 hosts
 RUN ARCH=$(uname -m) && \
     curl -fL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ARCH}-linux-${ZIG_VERSION}.tar.xz" \
     -o /tmp/zig.tar.xz \
