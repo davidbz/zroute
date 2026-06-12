@@ -57,7 +57,7 @@ jobs:
         run: zig build test
 
   fuzz:
-    name: Fuzz / smoke (30s)
+    name: Fuzz Smoke Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
