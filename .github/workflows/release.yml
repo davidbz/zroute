@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'   # semver tags only: v0.1.0, v1.2.3, etc.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (must already exist)'
+        required: true
+
+permissions:
+  contents: write   # Required to create the GitHub release
+
+jobs:
+  build:
+    name: Build / ${{ matrix.target }}
+    runs-on: ubuntu-latest   # Zig cross-compiles everything from Linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-musl     # Static binary — runs on any x86_64 Linux
+            artifact: zroute-x86_64-linux
+          - target: aarch64-linux-musl    # Static binary — Raspberry Pi, AWS Graviton, etc.
+            artifact: zroute-aarch64-linux
+          - target: x86_64-macos
+            artifact: zroute-x86_64-macos
+          - target: aarch64-macos         # Apple Silicon
+            artifact: zroute-aarch64-macos
+          - target: x86_64-windows-gnu
+            artifact: zroute-x86_64-windows.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Build
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+      # Normalise the binary name so the release page is clean.
+      - name: Stage artifact
+        run: |
+          src="zig-out/bin/zroute"
+          [[ "${{ matrix.target }}" == *windows* ]] && src="${src}.exe"
+          cp "$src" "${{ matrix.artifact }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts/
+
+      - name: Verify artifacts
+        run: ls -lh artifacts/
+
+      # Uses the built-in gh CLI — no third-party action required.
+      # --generate-notes auto-populates the release body from PR/commit history.
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          [[ "$tag" == "" ]] && tag="${{ inputs.tag }}"
+          gh release create "$tag" \
+            --repo "${{ github.repository }}" \
+            --title "$tag" \
+            --generate-notes \
+            artifacts/*
