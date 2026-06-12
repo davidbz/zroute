@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/devcontainers/base:ubuntu
+FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -18,13 +18,13 @@ RUN apt-get update && apt-get install -y \
 
 ARG ZIG_VERSION=0.16.0
 
-# Install Zig
-RUN curl -L https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz \
-    -o zig.tar.xz \
-    && tar xf zig.tar.xz \
-    && mv zig-x86_64-linux-${ZIG_VERSION} /opt/zig \
+# Install Zig — arch-agnostic so this works on x86_64 and aarch64 hosts
+RUN ARCH=$(uname -m) && \
+    curl -fL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ARCH}-${ZIG_VERSION}.tar.xz" \
+    -o /tmp/zig.tar.xz \
+    && tar xf /tmp/zig.tar.xz -C /opt \
+    && mv "/opt/zig-linux-${ARCH}-${ZIG_VERSION}" /opt/zig \
     && ln -s /opt/zig/zig /usr/local/bin/zig \
-    && rm zig.tar.xz
+    && rm /tmp/zig.tar.xz
 
-# Verify install
 RUN zig version

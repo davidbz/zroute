@@ -153,4 +153,20 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+
+    // Used by ZLS for build-on-save. Compiles all code without linking or
+    // installing, so IDE feedback is fast and zig-out/ stays clean.
+    const check_exe = b.addExecutable(.{
+        .name = "zroute",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zroute", .module = mod },
+            },
+        }),
+    });
+    const check = b.step("check", "Check compilation without installing");
+    check.dependOn(&check_exe.step);
 }

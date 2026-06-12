@@ -1,0 +1,14 @@
+{
+    "[zig]": {
+        "editor.defaultFormatter": "ziglang.vscode-zig",
+        "editor.formatOnSave": true,
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true
+    },
+    "zig.path": "/usr/local/bin/zig",
+    "zig.zls.enabled": "on",
+    "files.associations": {
+        "*.zon": "zig"
+    },
+    "editor.inlayHints.enabled": "on"
+}

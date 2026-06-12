@@ -7,11 +7,14 @@
     "vscode": {
       "extensions": [
         "ziglang.vscode-zig",
-        "ms-vscode.cpptools"
+        "vadimcn.vscode-lldb"
       ]
     }
   },
-  "postCreateCommand": "zig version",
+  "mounts": [
+    "source=zroute-zig-cache,target=${containerWorkspaceFolder}/.zig-cache,type=volume"
+  ],
+  "postCreateCommand": "zig version && zig build check",
   "remoteUser": "vscode",
   "runArgs": [
     "--cap-add=SYS_PTRACE",
