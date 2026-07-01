@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y \
     lldb \
     strace \
     ltrace \
-    bash-completion && \
+    bash-completion \
+    minisign && \
     apt-get autoremove -y && \
     apt-get clean autoclean && \
     rm -rf /var/lib/apt/lists/*
@@ -27,13 +28,17 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhisto
 
 RUN echo 'source /usr/share/bash-completion/bash_completion' >> /home/vscode/.bashrc
 
+# Official Zig release signing key (https://ziglang.org/download/).
+ARG ZIG_MINISIGN_KEY=RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
 ARG ZIG_VERSION=0.16.0
 RUN ARCH=$(uname -m) && \
-    curl -fL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ARCH}-linux-${ZIG_VERSION}.tar.xz" \
-    -o /tmp/zig.tar.xz \
-    && tar xf /tmp/zig.tar.xz -C /opt \
+    URL="https://ziglang.org/download/${ZIG_VERSION}/zig-${ARCH}-linux-${ZIG_VERSION}.tar.xz" && \
+    curl -fL "$URL" -o /tmp/zig.tar.xz && \
+    curl -fL "${URL}.minisig" -o /tmp/zig.tar.xz.minisig && \
+    minisign -Vm /tmp/zig.tar.xz -P "$ZIG_MINISIGN_KEY" && \
+    tar xf /tmp/zig.tar.xz -C /opt \
     && mv "/opt/zig-${ARCH}-linux-${ZIG_VERSION}" /opt/zig \
     && ln -s /opt/zig/zig /usr/local/bin/zig \
-    && rm /tmp/zig.tar.xz
+    && rm /tmp/zig.tar.xz /tmp/zig.tar.xz.minisig
 
 RUN zig version

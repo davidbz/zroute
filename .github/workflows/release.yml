@@ -11,7 +11,7 @@ on:
         required: true
 
 permissions:
-  contents: write   # Required to create the GitHub release
+  contents: read
 
 jobs:
   build:
@@ -59,6 +59,8 @@ jobs:
     name: Publish release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # Required to create the GitHub release
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -67,6 +69,11 @@ jobs:
 
       - name: Verify artifacts
         run: ls -lh artifacts/
+
+      # Lets downstream users verify the integrity of downloaded binaries.
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum * > checksums.txt
 
       # Uses the built-in gh CLI — no third-party action required.
       # --generate-notes auto-populates the release body from PR/commit history.
