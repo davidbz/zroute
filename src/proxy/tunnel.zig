@@ -100,9 +100,19 @@ fn splice(
     trace_id: TraceId,
     slot: u32,
 ) void {
-    var future = Io.concurrent(io, pump, .{ client_in, upstream_out, upstream_stream, io, metrics, trace_id, slot, "client->upstream" }) catch {
-        pump(client_in, upstream_out, upstream_stream, io, metrics, trace_id, slot, "client->upstream");
-        pump(upstream_in, client_out, client_stream, io, metrics, trace_id, slot, "upstream->client");
+    // If `Io.concurrent` can't spawn the client->upstream pump, running both
+    // pumps back-to-back on the calling task is NOT a valid fallback: a
+    // duplex protocol (every TLS handshake, since CONNECT never terminates
+    // TLS here) needs both directions pumping at once. The first pump would
+    // block reading from the client until the client reaches EOF, but a live
+    // client won't send EOF until it has received the server's half of the
+    // handshake — which is stuck in the second pump that hasn't started yet.
+    // That's a deadlock, not a degraded mode, so tear the tunnel down instead.
+    var future = Io.concurrent(io, pump, .{ client_in, upstream_out, upstream_stream, io, metrics, trace_id, slot, "client->upstream" }) catch |e| {
+        log.err(trace_id, slot, "tunnel concurrent spawn failed, aborting tunnel err={t}", .{e});
+        metrics.incr(.tunnel_concurrency_errors);
+        client_stream.shutdown(io, .both) catch {};
+        upstream_stream.shutdown(io, .both) catch {};
         return;
     };
     pump(upstream_in, client_out, client_stream, io, metrics, trace_id, slot, "upstream->client");

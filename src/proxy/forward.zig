@@ -138,7 +138,18 @@ fn relayResponse(request: *http.Server.Request, upstream_in: *Io.Reader, trace_i
         .state = .ready,
         .max_head_len = upstream_in.buffer.len,
     };
-    const head_bytes = upstream_head.receiveHead() catch |e| return timeout_reader.unwrap(upstream_in, e);
+    const head_bytes = upstream_head.receiveHead() catch |e| {
+        const unwrapped = timeout_reader.unwrap(upstream_in, e);
+        // An upstream response head that doesn't fit in `upstream_read_buf`
+        // would otherwise bubble up as a bare error and leave the client with
+        // nothing but an abrupt close; respond with a proper 502 instead.
+        if (unwrapped == error.HttpHeadersOversize) {
+            log.warn(trace_id, slot, "upstream response head exceeds {d} bytes", .{upstream_in.buffer.len});
+            try request.respond("Bad Gateway", .{ .status = .bad_gateway, .keep_alive = false });
+            return;
+        }
+        return unwrapped;
+    };
     const resp_head = http.Client.Response.Head.parse(head_bytes) catch |e| {
         // Malformed upstream response head (e.g. conflicting duplicate
         // Content-Length, non-final chunked, duplicate Transfer-Encoding).
@@ -252,6 +263,32 @@ test "relayResponse rejects a malformed upstream response head with 502 instead 
 
     const upstream_head = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\nbody";
     var upstream_in: Io.Reader = .fixed(upstream_head);
+
+    try relayResponse(&request, &upstream_in, 0, 0);
+
+    const written = client_out.buffered();
+    try std.testing.expect(std.mem.startsWith(u8, written, "HTTP/1.1 502 "));
+}
+
+test "relayResponse converts an oversized upstream response head into a 502 instead of a silent close" {
+    const client_head = "GET /x HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    var client_in: Io.Reader = .fixed(client_head);
+    var client_out_buf: [256]u8 = undefined;
+    var client_out: Io.Writer = .fixed(&client_out_buf);
+    var server: http.Server = .init(&client_in, &client_out);
+    var request = try server.receiveHead();
+
+    // A `.fixed` reader's buffer capacity equals its data length, so a head
+    // with no terminating blank line anywhere in a 16 KiB buffer reproduces
+    // exactly what a real upstream_read_buf (also 16 KiB, in forward.handle)
+    // does when the actual response headers exceed it: receiveHead runs out
+    // of buffer before finding the end of the head and returns
+    // error.HttpHeadersOversize.
+    var upstream_head_buf: [16 * 1024]u8 = undefined;
+    @memset(&upstream_head_buf, 'a');
+    const prefix = "HTTP/1.1 200 OK\r\nX-Pad: ";
+    @memcpy(upstream_head_buf[0..prefix.len], prefix);
+    var upstream_in: Io.Reader = .fixed(&upstream_head_buf);
 
     try relayResponse(&request, &upstream_in, 0, 0);
 
