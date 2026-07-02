@@ -102,3 +102,32 @@ test "parseHttpTarget origin-form requires Host header" {
 test "parseHttpTarget rejects non-http scheme" {
     try std.testing.expectError(error.UnsupportedScheme, parseHttpTarget("ftp://example.com/", null));
 }
+
+test "fuzz target parsing never panics" {
+    try std.testing.fuzz({}, fuzzParseTargets, .{});
+}
+
+/// Both parsers only ever see attacker-controlled bytes (the CONNECT
+/// authority / request-target / Host header of a client's HTTP request), so
+/// the property under test is purely "never panics, never runs out of
+/// bounds" — a returned error is a fine outcome, a crash is not.
+fn fuzzParseTargets(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [256]u8 = undefined;
+    const target_len = smith.slice(&buf);
+    const target_text = buf[0..target_len];
+
+    if (parseConnectTarget(target_text)) |t| {
+        std.debug.assert(t.host.len <= target_text.len);
+    } else |_| {}
+
+    var host_buf: [256]u8 = undefined;
+    const have_host_header = smith.value(bool);
+    const host_header: ?[]const u8 = if (have_host_header) h: {
+        const host_len = smith.slice(&host_buf);
+        break :h host_buf[0..host_len];
+    } else null;
+
+    if (parseHttpTarget(target_text, host_header)) |r| {
+        std.debug.assert(r.path.len <= target_text.len);
+    } else |_| {}
+}

@@ -50,7 +50,7 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
         return;
     };
 
-    log.info(trace_id, slot, "{t} {s}", .{ request.head.method, request.head.target });
+    log.debug(trace_id, slot, "{t} {s}", .{ request.head.method, request.head.target });
     deps.pool.touchActivity(slot, io);
 
     if (request.head.method == .CONNECT) {
