@@ -8,6 +8,8 @@ const ConnectionPool = pool_mod.ConnectionPool;
 const forward = @import("forward.zig");
 const tunnel = @import("tunnel.zig");
 const log = @import("log.zig");
+const timeout_reader = @import("timeout_reader.zig");
+const TimeoutReader = timeout_reader.TimeoutReader;
 const telemetry_mod = @import("../telemetry/telemetry.zig");
 const Telemetry = telemetry_mod.Telemetry;
 const TraceId = telemetry_mod.TraceId;
@@ -23,6 +25,9 @@ pub const Deps = struct {
     pool: *ConnectionPool,
     telemetry: *Telemetry,
     resolver: Resolver,
+    /// Max gap between bytes on any read before the connection is torn down
+    /// as stalled. `.none` disables idle enforcement. See `Config.idle_timeout_ms`.
+    idle_timeout: Io.Timeout,
 };
 
 /// Owns one accepted connection end-to-end: parses the request head,
@@ -40,23 +45,22 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
 
     var in_buf: [head_buffer_size]u8 = undefined;
     var out_buf: [relay_buffer_size]u8 = undefined;
-    var stream_reader = stream.reader(io, &in_buf);
+    var stream_reader: TimeoutReader = .init(stream, io, &in_buf, deps.idle_timeout);
     var stream_writer = stream.writer(io, &out_buf);
     var server: http.Server = .init(&stream_reader.interface, &stream_writer.interface);
 
     deps.pool.setState(slot, .parsing_head);
     var request = server.receiveHead() catch |e| {
-        log.warn(trace_id, slot, "receive head failed err={t}", .{e});
+        log.warn(trace_id, slot, "receive head failed err={t}", .{timeout_reader.unwrap(&stream_reader.interface, e)});
         return;
     };
 
     log.debug(trace_id, slot, "{t} {s}", .{ request.head.method, request.head.target });
-    deps.pool.touchActivity(slot, io);
 
     if (request.head.method == .CONNECT) {
         deps.pool.setState(slot, .tunneling);
         deps.telemetry.metrics.incr(.requests_connect);
-        tunnel.handle(&request, stream, io, deps.resolver, &deps.telemetry.metrics, trace_id, slot) catch |e| {
+        tunnel.handle(&request, stream, io, deps.resolver, &deps.telemetry.metrics, trace_id, slot, deps.idle_timeout) catch |e| {
             log.warn(trace_id, slot, "tunnel error err={t}", .{e});
             deps.telemetry.metrics.incr(.relay_errors);
         };
@@ -65,7 +69,7 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
 
     deps.pool.setState(slot, .relaying_http);
     deps.telemetry.metrics.incr(.requests_http);
-    forward.handle(&request, io, deps.resolver, &deps.telemetry.metrics, trace_id, slot) catch |e| {
+    forward.handle(&request, io, deps.resolver, &deps.telemetry.metrics, trace_id, slot, deps.idle_timeout) catch |e| {
         log.warn(trace_id, slot, "forward error err={t}", .{e});
         deps.telemetry.metrics.incr(.relay_errors);
     };

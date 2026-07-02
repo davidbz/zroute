@@ -39,6 +39,7 @@ pub fn main(init: std.process.Init) !void {
         .pool = &pool,
         .telemetry = &telemetry,
         .resolver = resolver,
+        .idle_timeout = cfg.idleTimeout(),
     };
 
     const listen_address = try cfg.listenAddress();

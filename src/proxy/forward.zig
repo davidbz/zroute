@@ -7,6 +7,8 @@ const target_mod = @import("target.zig");
 const relay = @import("relay.zig");
 const Resolver = @import("resolver.zig").Resolver;
 const log = @import("log.zig");
+const timeout_reader = @import("timeout_reader.zig");
+const TimeoutReader = timeout_reader.TimeoutReader;
 const TraceId = @import("../telemetry/span.zig").TraceId;
 const Metrics = @import("../telemetry/metrics.zig").Metrics;
 
@@ -60,6 +62,7 @@ pub fn handle(
     metrics: *Metrics,
     trace_id: TraceId,
     slot: u32,
+    idle_timeout: Io.Timeout,
 ) !void {
     const host_header = findHeaderValue(request, "host");
     const parsed = target_mod.parseHttpTarget(request.head.target, host_header) catch |e| {
@@ -98,7 +101,7 @@ pub fn handle(
 
     var upstream_read_buf: [16 * 1024]u8 = undefined;
     var upstream_write_buf: [4 * 1024]u8 = undefined;
-    var upstream_reader = upstream.reader(io, &upstream_read_buf);
+    var upstream_reader: TimeoutReader = .init(upstream, io, &upstream_read_buf, idle_timeout);
     var upstream_writer = upstream.writer(io, &upstream_write_buf);
 
     try forwardRequest(request, &upstream_writer.interface, parsed.path);
@@ -113,9 +116,9 @@ fn forwardRequest(request: *http.Server.Request, w: *Io.Writer, path: []const u8
 
     const client_body = request.server.reader.in;
     if (request.head.transfer_encoding == .chunked) {
-        try relay.copyChunkedVerbatim(client_body, w);
+        relay.copyChunkedVerbatim(client_body, w) catch |e| return timeout_reader.unwrap(client_body, e);
     } else if (request.head.content_length) |len| {
-        if (len > 0) try relay.copyExact(client_body, w, len);
+        if (len > 0) relay.copyExact(client_body, w, len) catch |e| return timeout_reader.unwrap(client_body, e);
     }
     try w.flush();
 }
@@ -127,7 +130,7 @@ fn relayResponse(request: *http.Server.Request, upstream_in: *Io.Reader) !void {
         .state = .ready,
         .max_head_len = upstream_in.buffer.len,
     };
-    const head_bytes = try upstream_head.receiveHead();
+    const head_bytes = upstream_head.receiveHead() catch |e| return timeout_reader.unwrap(upstream_in, e);
     const resp_head = try http.Client.Response.Head.parse(head_bytes);
 
     const client_out = request.server.out;
@@ -136,11 +139,11 @@ fn relayResponse(request: *http.Server.Request, upstream_in: *Io.Reader) !void {
     try client_out.writeAll("Connection: close\r\n\r\n");
 
     if (resp_head.transfer_encoding == .chunked) {
-        try relay.copyChunkedVerbatim(upstream_in, client_out);
+        relay.copyChunkedVerbatim(upstream_in, client_out) catch |e| return timeout_reader.unwrap(upstream_in, e);
     } else if (resp_head.content_length) |len| {
-        if (len > 0) try relay.copyExact(upstream_in, client_out, len);
+        if (len > 0) relay.copyExact(upstream_in, client_out, len) catch |e| return timeout_reader.unwrap(upstream_in, e);
     } else {
-        _ = try relay.copyUntilEof(upstream_in, client_out);
+        _ = relay.copyUntilEof(upstream_in, client_out) catch |e| return timeout_reader.unwrap(upstream_in, e);
     }
     try client_out.flush();
 }
