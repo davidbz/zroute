@@ -10,6 +10,7 @@ pub const pool = @import("proxy/pool.zig");
 pub const target = @import("proxy/target.zig");
 pub const resolver = @import("proxy/resolver.zig");
 pub const relay = @import("proxy/relay.zig");
+pub const timeout_reader = @import("proxy/timeout_reader.zig");
 pub const proxy_log = @import("proxy/log.zig");
 pub const forward = @import("proxy/forward.zig");
 pub const tunnel = @import("proxy/tunnel.zig");

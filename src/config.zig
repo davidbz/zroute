@@ -12,6 +12,10 @@ pub const Config = struct {
     /// 0 = disabled: no periodic metrics snapshot is logged. Non-zero starts
     /// a background task that logs one snapshot line every this many ms.
     metrics_interval_ms: u64 = 0,
+    /// Max gap between bytes on a client or upstream connection before it is
+    /// torn down as stalled (slowloris defense). 0 disables idle enforcement
+    /// entirely, restoring unbounded blocking reads.
+    idle_timeout_ms: u64 = 60_000,
 
     pub fn listenAddress(cfg: Config) !Io.net.IpAddress {
         return Io.net.IpAddress.parse(cfg.listen_host, cfg.listen_port);
@@ -24,6 +28,11 @@ pub const Config = struct {
     pub fn metricsInterval(cfg: Config) ?Io.Timeout {
         if (cfg.metrics_interval_ms == 0) return null;
         return msTimeout(cfg.metrics_interval_ms);
+    }
+
+    pub fn idleTimeout(cfg: Config) Io.Timeout {
+        if (cfg.idle_timeout_ms == 0) return .none;
+        return msTimeout(cfg.idle_timeout_ms);
     }
 
     fn msTimeout(ms: u64) Io.Timeout {
@@ -114,6 +123,12 @@ fn applyArgs(cfg: *Config, args: []const []const u8) ParseError!void {
             i += 1;
             if (i >= args.len) return error.InvalidArgument;
             cfg.metrics_interval_ms = std.fmt.parseInt(u64, args[i], 10) catch return error.InvalidNumber;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--idle-timeout-ms")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArgument;
+            cfg.idle_timeout_ms = std.fmt.parseInt(u64, args[i], 10) catch return error.InvalidNumber;
             continue;
         }
         return error.InvalidArgument;

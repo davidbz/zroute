@@ -44,7 +44,6 @@ pub const ConnectionPool = struct {
     trace_ids: []TraceId,
     remote_addrs: []Io.net.IpAddress,
     states: []std.atomic.Value(ConnState),
-    last_activity_at: []Io.Timestamp,
     next_free: []std.atomic.Value(u32),
     free_head: std.atomic.Value(u64),
 
@@ -55,8 +54,6 @@ pub const ConnectionPool = struct {
         errdefer gpa.free(remote_addrs);
         const states = try gpa.alloc(std.atomic.Value(ConnState), capacity);
         errdefer gpa.free(states);
-        const last_activity_at = try gpa.alloc(Io.Timestamp, capacity);
-        errdefer gpa.free(last_activity_at);
         const next_free = try gpa.alloc(std.atomic.Value(u32), capacity);
         errdefer gpa.free(next_free);
 
@@ -71,7 +68,6 @@ pub const ConnectionPool = struct {
             .trace_ids = trace_ids,
             .remote_addrs = remote_addrs,
             .states = states,
-            .last_activity_at = last_activity_at,
             .next_free = next_free,
             .free_head = .init(pack(0, if (capacity == 0) invalid_slot else 0)),
         };
@@ -81,7 +77,6 @@ pub const ConnectionPool = struct {
         gpa.free(pool.trace_ids);
         gpa.free(pool.remote_addrs);
         gpa.free(pool.states);
-        gpa.free(pool.last_activity_at);
         gpa.free(pool.next_free);
         pool.* = undefined;
     }
@@ -89,7 +84,7 @@ pub const ConnectionPool = struct {
     /// Pops a free slot off the lock-free free list. Returns null (guard
     /// clause: pool exhausted) instead of growing — callers must reject the
     /// connection.
-    pub fn acquire(pool: *ConnectionPool, trace_id: TraceId, remote_addr: Io.net.IpAddress, io: Io) ?u32 {
+    pub fn acquire(pool: *ConnectionPool, trace_id: TraceId, remote_addr: Io.net.IpAddress) ?u32 {
         while (true) {
             const word = pool.free_head.load(.acquire);
             const head = index(word);
@@ -99,7 +94,6 @@ pub const ConnectionPool = struct {
 
             pool.trace_ids[head] = trace_id;
             pool.remote_addrs[head] = remote_addr;
-            pool.last_activity_at[head] = .now(io, .awake);
             pool.states[head].store(.accepted, .release);
             return head;
         }
@@ -119,10 +113,6 @@ pub const ConnectionPool = struct {
     pub fn setState(pool: *ConnectionPool, slot: u32, state: ConnState) void {
         pool.states[slot].store(state, .release);
     }
-
-    pub fn touchActivity(pool: *ConnectionPool, slot: u32, io: Io) void {
-        pool.last_activity_at[slot] = .now(io, .awake);
-    }
 };
 
 test "acquire/release cycle exhausts and refills capacity" {
@@ -130,17 +120,13 @@ test "acquire/release cycle exhausts and refills capacity" {
     var pool: ConnectionPool = try .init(gpa, 2);
     defer pool.deinit(gpa);
 
-    var threaded: Io.Threaded = .init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
     const addr: Io.net.IpAddress = try .parse("127.0.0.1", 0);
-    const a = pool.acquire(1, addr, io) orelse return error.TestUnexpectedResult;
-    const b = pool.acquire(2, addr, io) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(pool.acquire(3, addr, io) == null);
+    const a = pool.acquire(1, addr) orelse return error.TestUnexpectedResult;
+    const b = pool.acquire(2, addr) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pool.acquire(3, addr) == null);
 
     pool.release(a);
-    const c = pool.acquire(4, addr, io) orelse return error.TestUnexpectedResult;
+    const c = pool.acquire(4, addr) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(a, c);
 
     pool.release(b);
@@ -152,12 +138,8 @@ test "released slot state resets to idle" {
     var pool: ConnectionPool = try .init(gpa, 1);
     defer pool.deinit(gpa);
 
-    var threaded: Io.Threaded = .init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
     const addr: Io.net.IpAddress = try .parse("127.0.0.1", 0);
-    const slot = pool.acquire(1, addr, io) orelse return error.TestUnexpectedResult;
+    const slot = pool.acquire(1, addr) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(ConnState.accepted, pool.states[slot].load(.monotonic));
     pool.release(slot);
     try std.testing.expectEqual(ConnState.idle, pool.states[slot].load(.monotonic));
@@ -172,10 +154,6 @@ test "concurrent acquire/release is ABA-safe under true MPMC stress" {
     var pool: ConnectionPool = try .init(gpa, capacity);
     defer pool.deinit(gpa);
 
-    var threaded: Io.Threaded = .init(gpa, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
     const addr: Io.net.IpAddress = try .parse("127.0.0.1", 0);
 
     // Slot indices are bounded by `capacity`, so "is this slot currently
@@ -183,7 +161,6 @@ test "concurrent acquire/release is ABA-safe under true MPMC stress" {
     // each flag's own CAS is the double-hold check, with no separate lock.
     const Shared = struct {
         pool: *ConnectionPool,
-        io: Io,
         addr: Io.net.IpAddress,
         held: [capacity]std.atomic.Value(bool) = @splat(.init(false)),
         failed: std.atomic.Value(bool) = .init(false),
@@ -191,7 +168,7 @@ test "concurrent acquire/release is ABA-safe under true MPMC stress" {
         fn worker(shared: *@This()) void {
             var i: usize = 0;
             while (i < iterations) : (i += 1) {
-                const slot = shared.pool.acquire(1, shared.addr, shared.io) orelse continue;
+                const slot = shared.pool.acquire(1, shared.addr) orelse continue;
                 if (slot >= capacity) {
                     shared.failed.store(true, .monotonic);
                     continue;
@@ -209,7 +186,7 @@ test "concurrent acquire/release is ABA-safe under true MPMC stress" {
         }
     };
 
-    var shared: Shared = .{ .pool = &pool, .io = io, .addr = addr };
+    var shared: Shared = .{ .pool = &pool, .addr = addr };
 
     var threads: [num_threads]std.Thread = undefined;
     for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Shared.worker, .{&shared});
@@ -218,7 +195,7 @@ test "concurrent acquire/release is ABA-safe under true MPMC stress" {
     try std.testing.expect(!shared.failed.load(.monotonic));
 
     var slots: [capacity]u32 = undefined;
-    for (&slots) |*s| s.* = pool.acquire(1, addr, io) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(pool.acquire(1, addr, io) == null);
+    for (&slots) |*s| s.* = pool.acquire(1, addr) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pool.acquire(1, addr) == null);
     for (slots) |s| pool.release(s);
 }

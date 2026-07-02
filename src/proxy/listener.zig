@@ -44,7 +44,7 @@ pub const Listener = struct {
             };
 
             const trace_id = l.telemetry.nextTraceId();
-            const slot = l.pool.acquire(trace_id, stream.socket.address, io) orelse {
+            const slot = l.pool.acquire(trace_id, stream.socket.address) orelse {
                 l.telemetry.metrics.incr(.connections_rejected);
                 stream.close(io);
                 continue;

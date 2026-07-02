@@ -7,6 +7,8 @@ const target_mod = @import("target.zig");
 const relay = @import("relay.zig");
 const Resolver = @import("resolver.zig").Resolver;
 const log = @import("log.zig");
+const timeout_reader = @import("timeout_reader.zig");
+const TimeoutReader = timeout_reader.TimeoutReader;
 const TraceId = @import("../telemetry/span.zig").TraceId;
 const Metrics = @import("../telemetry/metrics.zig").Metrics;
 
@@ -22,6 +24,7 @@ pub fn handle(
     metrics: *Metrics,
     trace_id: TraceId,
     slot: u32,
+    idle_timeout: Io.Timeout,
 ) !void {
     const target = target_mod.parseConnectTarget(request.head.target) catch |e| {
         log.warn(trace_id, slot, "bad connect target={s} err={t}", .{ request.head.target, e });
@@ -61,7 +64,7 @@ pub fn handle(
 
     var upstream_read_buf: [64 * 1024]u8 = undefined;
     var upstream_write_buf: [64 * 1024]u8 = undefined;
-    var upstream_reader = upstream.reader(io, &upstream_read_buf);
+    var upstream_reader: TimeoutReader = .init(upstream, io, &upstream_read_buf, idle_timeout);
     var upstream_writer = upstream.writer(io, &upstream_write_buf);
 
     splice(
@@ -72,6 +75,9 @@ pub fn handle(
         &upstream_writer.interface,
         upstream,
         io,
+        metrics,
+        trace_id,
+        slot,
     );
 }
 
@@ -90,19 +96,28 @@ fn splice(
     upstream_out: *Io.Writer,
     upstream_stream: net.Stream,
     io: Io,
+    metrics: *Metrics,
+    trace_id: TraceId,
+    slot: u32,
 ) void {
-    var future = Io.concurrent(io, pump, .{ client_in, upstream_out, upstream_stream, io }) catch {
-        pump(client_in, upstream_out, upstream_stream, io);
-        pump(upstream_in, client_out, client_stream, io);
+    var future = Io.concurrent(io, pump, .{ client_in, upstream_out, upstream_stream, io, metrics, trace_id, slot, "client->upstream" }) catch {
+        pump(client_in, upstream_out, upstream_stream, io, metrics, trace_id, slot, "client->upstream");
+        pump(upstream_in, client_out, client_stream, io, metrics, trace_id, slot, "upstream->client");
         return;
     };
-    pump(upstream_in, client_out, client_stream, io);
+    pump(upstream_in, client_out, client_stream, io, metrics, trace_id, slot, "upstream->client");
     future.await(io);
 }
 
 /// Copies `r` into `w` until EOF or error, then shuts down `peer` so whatever
 /// is blocked reading/writing on the other end of the tunnel is released.
-fn pump(r: *Io.Reader, w: *Io.Writer, peer: net.Stream, io: Io) void {
-    _ = relay.copyUntilEof(r, w) catch {};
+/// A non-EOF failure (most commonly an idle timeout — see `TimeoutReader`) is
+/// a normal way for a tunnel to end, not a bug, but previously vanished
+/// silently here; it's now logged and counted like every other relay error.
+fn pump(r: *Io.Reader, w: *Io.Writer, peer: net.Stream, io: Io, metrics: *Metrics, trace_id: TraceId, slot: u32, direction: []const u8) void {
+    if (relay.copyUntilEof(r, w)) |_| {} else |e| {
+        log.warn(trace_id, slot, "tunnel relay error dir={s} err={t}", .{ direction, timeout_reader.unwrap(r, e) });
+        metrics.incr(.relay_errors);
+    }
     peer.shutdown(io, .both) catch {};
 }
