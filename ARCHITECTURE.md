@@ -33,7 +33,8 @@ src/
   telemetry/
     telemetry.zig              bundles Metrics + trace-id generation
     span.zig                    TraceId type + generator
-    metrics.zig                  atomic counters
+    metrics.zig                  atomic counters + snapshot()
+    reporter.zig                 periodic snapshot -> log line
 ```
 
 Each file has one job. `forward.zig` and `tunnel.zig` both do
@@ -48,6 +49,7 @@ main()
   ├─ config.load(gpa, io, argv)        compiled defaults -> zroute.json -> CLI flags
   ├─ Io.Threaded.init(gpa, .{})        the only working Io backend (see below)
   ├─ Telemetry.init(random_node_prefix)
+  ├─ if cfg.metricsInterval(): metrics_group.async(reporter.run)   opt-in, off by default
   ├─ ConnectionPool.init(gpa, cfg.max_connections)   one fixed allocation, never grows
   ├─ build dns_servers: []IpAddress    parses cfg.dns_servers, port 53
   ├─ Resolver.init(dns_servers, ...)   .system if empty, .custom otherwise
@@ -246,7 +248,15 @@ socket we control, not a stdlib-internal connect path.
   a struct-of-arrays of atomic counters (`connections_total/active/rejected`,
   `requests_http/connect`, `upstream_connect_errors`, `relay_errors`).
   `incr`/`decr`/`add`/`get` are all single atomic ops on a shared pointer;
-  no per-request allocation or locking.
+  no per-request allocation or locking. `upstream_connect_errors` is
+  incremented in `forward.zig`/`tunnel.zig` on the `resolver.connect(...)
+  catch` branch, right before the client gets its 502.
+- **Export** (`telemetry/reporter.zig`): `Metrics.snapshot()` returns a
+  `[Counter.count]u64` (one atomic `load` per counter, not a consistent
+  point-in-time view). When `Config.metrics_interval_ms` is non-zero,
+  `main.zig` spawns `reporter.run` in its own `Io.Group`; it wakes every
+  interval and logs one `name=value ...` line via `formatSnapshot`. Default
+  is `0` (disabled) — this is the only place any counter is ever read back.
 
 ## Zero-allocation hot path
 
@@ -272,7 +282,7 @@ compiled-in Config{} defaults
 JSON file (std.json.parseFromSlice, missing fields keep their default)
         │
         ▼
-CLI flags (--listen, --max-connections; unknown flags are a hard error)
+CLI flags (--listen, --max-connections, --metrics-interval-ms; unknown flags are a hard error)
 ```
 
 Each layer only needs to mention the fields it wants to change; later
