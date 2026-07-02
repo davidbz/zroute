@@ -56,7 +56,7 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
     if (request.head.method == .CONNECT) {
         deps.pool.setState(slot, .tunneling);
         deps.telemetry.metrics.incr(.requests_connect);
-        tunnel.handle(&request, stream, io, deps.resolver, trace_id, slot) catch |e| {
+        tunnel.handle(&request, stream, io, deps.resolver, &deps.telemetry.metrics, trace_id, slot) catch |e| {
             log.warn(trace_id, slot, "tunnel error err={t}", .{e});
             deps.telemetry.metrics.incr(.relay_errors);
         };
@@ -65,7 +65,7 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
 
     deps.pool.setState(slot, .relaying_http);
     deps.telemetry.metrics.incr(.requests_http);
-    forward.handle(&request, io, deps.resolver, trace_id, slot) catch |e| {
+    forward.handle(&request, io, deps.resolver, &deps.telemetry.metrics, trace_id, slot) catch |e| {
         log.warn(trace_id, slot, "forward error err={t}", .{e});
         deps.telemetry.metrics.incr(.relay_errors);
     };

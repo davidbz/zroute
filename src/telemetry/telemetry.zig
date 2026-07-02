@@ -7,6 +7,8 @@ const metrics_mod = @import("metrics.zig");
 pub const Metrics = metrics_mod.Metrics;
 pub const Counter = metrics_mod.Counter;
 
+pub const reporter = @import("reporter.zig");
+
 pub const Telemetry = struct {
     metrics: Metrics = .{},
     node_prefix: u64,

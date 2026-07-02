@@ -33,6 +33,15 @@ pub const Metrics = struct {
     pub fn get(m: *const Metrics, c: Counter) u64 {
         return m.counters[@intFromEnum(c)].load(.monotonic);
     }
+
+    /// One slot per `Counter`, indexed by `@intFromEnum`. Each slot is its
+    /// own atomic `load` — not a consistent point-in-time view across
+    /// counters, just the cheapest thing an exporter can format.
+    pub fn snapshot(m: *const Metrics) [Counter.count]u64 {
+        var out: [Counter.count]u64 = undefined;
+        for (&out, 0..) |*v, i| v.* = m.counters[i].load(.monotonic);
+        return out;
+    }
 };
 
 test "Metrics incr/decr/get" {
@@ -41,4 +50,19 @@ test "Metrics incr/decr/get" {
     m.incr(.connections_total);
     m.decr(.connections_total);
     try std.testing.expectEqual(@as(u64, 1), m.get(.connections_total));
+}
+
+test "Metrics.snapshot reflects incr/decr across all counters" {
+    var m: Metrics = .{};
+    inline for (@typeInfo(Counter).@"enum".fields) |f| {
+        m.incr(@field(Counter, f.name));
+        m.incr(@field(Counter, f.name));
+    }
+    m.decr(.relay_errors);
+
+    const s = m.snapshot();
+    inline for (@typeInfo(Counter).@"enum".fields, 0..) |f, i| {
+        const expected: u64 = if (std.mem.eql(u8, f.name, "relay_errors")) 1 else 2;
+        try std.testing.expectEqual(expected, s[i]);
+    }
 }
