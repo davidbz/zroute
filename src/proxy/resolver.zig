@@ -64,11 +64,22 @@ pub const CustomResolver = struct {
 
         var query_buf: [320]u8 = undefined;
         const query = try buildQuery(host, &query_buf, io);
+        const txid = std.mem.readInt(u16, query[0..2], .big);
         try socket.send(io, &server, query);
 
+        // Absolute deadline, not a per-packet duration: an off-path attacker
+        // racing the real server could flood us with junk datagrams, and
+        // re-arming a fresh timeout for each one would let them stall us
+        // indefinitely. `deadline` is a fixed point in time, so every
+        // `receiveTimeout` below waits only for whatever budget remains.
+        const deadline = c.timeout.toDeadline(io);
         var resp_buf: [512]u8 = undefined;
-        const msg = try socket.receiveTimeout(io, &resp_buf, c.timeout);
-        return parseAAnswers(msg.data, out);
+        while (true) {
+            const msg = try socket.receiveTimeout(io, &resp_buf, deadline);
+            if (!server.eql(&msg.from)) continue;
+            if (!isValidResponse(msg.data, txid)) continue;
+            return parseAAnswers(msg.data, out);
+        }
     }
 };
 
@@ -107,6 +118,20 @@ fn buildQuery(host: HostName, buf: []u8, io: Io) QueryError![]const u8 {
     w += 2;
 
     return buf[0..w];
+}
+
+/// Rejects anything that isn't plausibly a reply to our own query: too
+/// short to hold a header, wrong transaction ID (the primary spoofing
+/// defense — an off-path attacker guessing this is what we rely on), not
+/// marked as a response, or a nonzero RCODE. Flags live in bytes [2..4]:
+/// bit 15 is QR, the low nibble is RCODE.
+fn isValidResponse(packet: []const u8, txid: u16) bool {
+    if (packet.len < 12) return false;
+    if (std.mem.readInt(u16, packet[0..2], .big) != txid) return false;
+    const flags = std.mem.readInt(u16, packet[2..4], .big);
+    const qr_set = flags & 0x8000 != 0;
+    const rcode = flags & 0x000f;
+    return qr_set and rcode == 0;
 }
 
 /// Walks the answer section, keeping only `A` records, decoding each 4-byte
@@ -149,6 +174,29 @@ test "buildQuery produces a well-formed packet for a known hostname" {
     try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, query[25..27], .big));
     try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, query[27..29], .big));
     try std.testing.expectEqual(@as(usize, 29), query.len);
+}
+
+test "isValidResponse checks length, txid, QR bit, and RCODE" {
+    var packet: [12]u8 = @splat(0);
+    std.mem.writeInt(u16, packet[0..2], 0x1234, .big);
+    std.mem.writeInt(u16, packet[2..4], 0x8180, .big); // QR=1, RCODE=0 (NOERROR)
+    try std.testing.expect(isValidResponse(&packet, 0x1234));
+
+    // Transaction ID mismatch: the primary spoofing defense.
+    try std.testing.expect(!isValidResponse(&packet, 0x4321));
+
+    // QR bit unset: this is a query, not a response.
+    var not_response = packet;
+    std.mem.writeInt(u16, not_response[2..4], 0x0100, .big);
+    try std.testing.expect(!isValidResponse(&not_response, 0x1234));
+
+    // Nonzero RCODE (2 = SERVFAIL).
+    var servfail = packet;
+    std.mem.writeInt(u16, servfail[2..4], 0x8182, .big);
+    try std.testing.expect(!isValidResponse(&servfail, 0x1234));
+
+    // Too short to contain a full header.
+    try std.testing.expect(!isValidResponse(packet[0..4], 0x1234));
 }
 
 test "parseAAnswers decodes a canned A-record response" {
@@ -195,6 +243,13 @@ test "parseAAnswers decodes a canned A-record response" {
     w += 4;
 
     var out: [4]net.IpAddress = undefined;
+
+    // A spoofed/stale reply with the wrong transaction ID must be rejected
+    // before we ever try to parse it.
+    try std.testing.expect(!isValidResponse(packet[0..w], 0xffff));
+
+    // The genuine reply (matching txid) is accepted and yields the address.
+    try std.testing.expect(isValidResponse(packet[0..w], 0x1234));
     const n = try parseAAnswers(packet[0..w], &out);
     try std.testing.expectEqual(@as(usize, 1), n);
     try std.testing.expectEqualSlices(u8, &.{ 93, 184, 216, 34 }, &out[0].ip4.bytes);
