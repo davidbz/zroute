@@ -144,14 +144,19 @@ ConnectionPool (fixed capacity, allocated once from Config.max_connections)
   states           [atomic ConnState; N]     idle → accepted → parsing_head → {relaying_http|tunneling} → idle
   last_activity_at [Timestamp; N]
   next_free        [atomic u32; N]           intrusive singly-linked free list
-  free_head        atomic u32                Treiber-stack head (CAS push/pop)
+  free_head        atomic u64                Treiber-stack head: high 32 bits generation tag, low 32 bits slot index
 ```
 
 A connection's identity for its whole lifetime is the `u32` slot returned
 by `acquire()` — cheap to copy into a spawned task's argument list, no
 pointer, no allocation. `acquire()`/`release()` are lock-free CAS loops over
 `free_head`/`next_free` (a Treiber stack), so many connection tasks can
-concurrently acquire/release slots without a mutex. A full pool (`acquire`
+concurrently acquire/release slots without a mutex. The generation tag
+packed into `free_head` is bumped on every push and every pop, making the
+stack genuinely ABA-safe under true multi-producer/multi-consumer
+acquire/release — a stale head word read by one thread can never
+spuriously CAS-match after other threads have popped and re-pushed the
+same slot in between. A full pool (`acquire`
 returns `null`) makes the listener reject the connection immediately
 (`connections_rejected` metric, socket closed) rather than blocking or
 growing the table.
