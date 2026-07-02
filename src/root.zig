@@ -1,18 +1,25 @@
-//! By convention, root.zig is the root source file when making a package.
+//! Public re-export surface for the zroute module. main.zig depends only on
+//! this file; nothing here does any work itself.
 const std = @import("std");
-const Io = std.Io;
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
-}
+pub const config = @import("config.zig");
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
+pub const telemetry = @import("telemetry/telemetry.zig");
 
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+pub const pool = @import("proxy/pool.zig");
+pub const target = @import("proxy/target.zig");
+pub const resolver = @import("proxy/resolver.zig");
+pub const relay = @import("proxy/relay.zig");
+pub const proxy_log = @import("proxy/log.zig");
+pub const forward = @import("proxy/forward.zig");
+pub const tunnel = @import("proxy/tunnel.zig");
+pub const connection = @import("proxy/connection.zig");
+pub const listener = @import("proxy/listener.zig");
+
+pub const Config = config.Config;
+pub const ConnectionPool = pool.ConnectionPool;
+pub const Telemetry = telemetry.Telemetry;
+
+test {
+    std.testing.refAllDecls(@This());
 }
