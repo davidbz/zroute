@@ -7,6 +7,7 @@ const target_mod = @import("target.zig");
 const relay = @import("relay.zig");
 const Resolver = @import("resolver.zig").Resolver;
 const log = @import("log.zig");
+const http_compat = @import("http_compat.zig");
 const timeout_reader = @import("timeout_reader.zig");
 const TimeoutReader = timeout_reader.TimeoutReader;
 const TraceId = @import("../telemetry/span.zig").TraceId;
@@ -68,8 +69,8 @@ pub fn handle(
     var upstream_writer = upstream.writer(io, &upstream_write_buf);
 
     splice(
-        request.server.reader.in,
-        request.server.out,
+        http_compat.clientBodyReader(request),
+        http_compat.clientResponseWriter(request),
         client_stream,
         &upstream_reader.interface,
         &upstream_writer.interface,
