@@ -33,7 +33,7 @@ pub fn handle(
         return;
     };
 
-    log.info(trace_id, slot, "connect {s}:{d}", .{ target.host, target.port });
+    log.debug(trace_id, slot, "connect {s}:{d}", .{ target.host, target.port });
 
     // `.timeout` is intentionally left `.none` — see the matching comment in
     // forward.zig for why (a stdlib panic, not an oversight).

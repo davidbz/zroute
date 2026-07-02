@@ -72,7 +72,7 @@ pub fn handle(
         return;
     };
 
-    log.info(trace_id, slot, "http {s} {s}:{d}{s}", .{
+    log.debug(trace_id, slot, "http {s} {s}:{d}{s}", .{
         @tagName(request.head.method), parsed.target.host, parsed.target.port, parsed.path,
     });
 
