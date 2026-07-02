@@ -7,6 +7,7 @@ const target_mod = @import("target.zig");
 const relay = @import("relay.zig");
 const Resolver = @import("resolver.zig").Resolver;
 const log = @import("log.zig");
+const http_compat = @import("http_compat.zig");
 const timeout_reader = @import("timeout_reader.zig");
 const TimeoutReader = timeout_reader.TimeoutReader;
 const TraceId = @import("../telemetry/span.zig").TraceId;
@@ -122,7 +123,7 @@ fn forwardRequest(request: *http.Server.Request, w: *Io.Writer, path: []const u8
     try w.writeAll("Connection: close\r\n\r\n");
     try w.flush();
 
-    const client_body = request.server.reader.in;
+    const client_body = http_compat.clientBodyReader(request);
     if (request.head.transfer_encoding == .chunked) {
         relay.copyChunkedVerbatim(client_body, w) catch |e| return timeout_reader.unwrap(client_body, e);
     } else if (request.head.content_length) |len| {
@@ -132,13 +133,7 @@ fn forwardRequest(request: *http.Server.Request, w: *Io.Writer, path: []const u8
 }
 
 fn relayResponse(request: *http.Server.Request, upstream_in: *Io.Reader, trace_id: TraceId, slot: u32) !void {
-    var upstream_head: http.Reader = .{
-        .in = upstream_in,
-        .interface = undefined,
-        .state = .ready,
-        .max_head_len = upstream_in.buffer.len,
-    };
-    const head_bytes = upstream_head.receiveHead() catch |e| {
+    const head_bytes = http_compat.upstreamResponseHead(upstream_in) catch |e| {
         const unwrapped = timeout_reader.unwrap(upstream_in, e);
         // An upstream response head that doesn't fit in `upstream_read_buf`
         // would otherwise bubble up as a bare error and leave the client with
@@ -160,7 +155,7 @@ fn relayResponse(request: *http.Server.Request, upstream_in: *Io.Reader, trace_i
         return;
     };
 
-    const client_out = request.server.out;
+    const client_out = http_compat.clientResponseWriter(request);
     try client_out.print("{t} {d} {s}\r\n", .{ resp_head.version, @intFromEnum(resp_head.status), resp_head.reason });
     try writeFilteredHeaders(client_out, head_bytes, resp_head.transfer_encoding == .chunked);
     try client_out.writeAll("Connection: close\r\n\r\n");
