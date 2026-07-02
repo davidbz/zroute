@@ -36,6 +36,8 @@ zig-out/bin/zroute --listen 0.0.0.0:8080
 | `--config <path>` | Load configuration from a JSON file. |
 | `--listen <host:port>` | Address to listen on. |
 | `--max-connections <n>` | Maximum concurrent connections. |
+| `--metrics-interval-ms <n>` | Log a metrics snapshot every `n` ms. `0` (default) disables it. |
+| `--idle-timeout-ms <n>` | Tear down a connection after `n` ms with no bytes read (slowloris defense). `0` disables idle enforcement. |
 
 CLI flags override values from a config file, which override compiled-in
 defaults.
@@ -52,12 +54,17 @@ to override.
   "listen_port": 8080,
   "max_connections": 8192,
   "dns_servers": ["1.1.1.1", "1.0.0.1"],
-  "dns_timeout_ms": 3000
+  "dns_timeout_ms": 3000,
+  "metrics_interval_ms": 0,
+  "idle_timeout_ms": 60000
 }
 ```
 
 - `dns_servers` — empty (default) uses the OS resolver (`/etc/resolv.conf`).
   If set, DNS queries go directly to these servers instead.
+- `idle_timeout_ms` — max gap between bytes on a client or upstream
+  connection before it's torn down as stalled (slowloris defense). `0`
+  disables idle enforcement entirely.
 
 ## Usage
 

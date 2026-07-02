@@ -29,6 +29,7 @@ src/
     forward.zig                 plain HTTP relay (parse -> connect -> relay)
     tunnel.zig                  CONNECT relay (parse -> connect -> splice)
     relay.zig                   shared byte-copy primitives
+    timeout_reader.zig          Io.Reader over a stream with a sliding idle deadline
     log.zig                     trace_id/slot-tagged structured logging
   telemetry/
     telemetry.zig              bundles Metrics + trace-id generation
@@ -144,7 +145,6 @@ ConnectionPool (fixed capacity, allocated once from Config.max_connections)
   trace_ids        [u128; N]
   remote_addrs     [IpAddress; N]
   states           [atomic ConnState; N]     idle → accepted → parsing_head → {relaying_http|tunneling} → idle
-  last_activity_at [Timestamp; N]
   next_free        [atomic u32; N]           intrusive singly-linked free list
   free_head        atomic u64                Treiber-stack head: high 32 bits generation tag, low 32 bits slot index
 ```
@@ -199,12 +199,13 @@ worker pool with synchronous fallback:**
   creation failure), running both pump directions sequentially on the
   calling thread instead.
 
-**Reads:** every reader (`stream.reader(io, buf)`) wraps a fixed
-stack-allocated buffer — 16 KiB for parsing the client's request head, 4–64
-KiB for relaying bodies/tunneling. A `read()` call blocks the OS thread
-executing that task until data arrives or the buffer is satisfied; there is
-no async/await suspension point here, blocking is real and threads are the
-unit of concurrency.
+**Reads:** every reader wraps a fixed stack-allocated buffer — 16 KiB for
+parsing the client's request head, 4–64 KiB for relaying bodies/tunneling.
+The client and upstream stream readers are `timeout_reader.TimeoutReader`,
+not the stdlib `net.Stream.Reader` — see **Timeouts**, below. A read call
+blocks the OS thread executing that task until data arrives, the buffer is
+satisfied, or the idle deadline elapses; there is no async/await suspension
+point here, blocking is real and threads are the unit of concurrency.
 
 **Writes and flush timing — two different strategies for two different
 shapes of traffic:**
@@ -231,10 +232,38 @@ shapes of traffic:**
 `.timeout = .none` deliberately — passing any other value currently hits an
 unimplemented path (`@panic("TODO implement netConnectIpPosix with
 timeout")`) in this Zig 0.16.0 stdlib, and there's no non-panicking way to
-race a connect against `Io.sleep` yet. The one place a real timeout is
-enforced is the custom DNS resolver's UDP `receiveTimeout`, bounded by
-`Config.dns_timeout_ms` (default 3000 ms) — since that's a `recv()` on a
-socket we control, not a stdlib-internal connect path.
+race a connect against `Io.sleep` yet.
+
+Everywhere else data is read off a socket, there is a timeout, because
+those are `recv()`s on sockets the proxy already owns, not the
+stdlib-internal connect path that panics: the DNS resolver's UDP
+`receiveTimeout`, bounded by `Config.dns_timeout_ms` (default 3000 ms), and
+every read of the client and upstream TCP streams, bounded by
+`Config.idle_timeout_ms` (default 60000 ms; `0` disables). The latter is
+`proxy/timeout_reader.zig`'s `TimeoutReader` — an `Io.Reader` wrapping a
+`net.Stream` that calls `Socket.receiveTimeout` (the same primitive the
+resolver uses) instead of an unbounded `netRead` on every read. It's a
+*sliding* idle window, not a total-request budget: the timeout is measured
+fresh on each call, so a steady trickle of bytes keeps a connection alive
+indefinitely while a silent peer — e.g. a `CONNECT` that sends nothing —
+is torn down within one window. `Io.Reader`'s vtable error set is fixed
+(`error.ReadFailed`, not open), so `TimeoutReader` stashes the real error
+(`error.IdleTimeout`, or whatever `receiveTimeout` returned) in a field and
+callers recover it via `timeout_reader.unwrap()`. An idle timeout is
+treated as ordinary connection teardown, not a fault: it's logged at
+`warn`, counted in `relay_errors`, and the peer socket is shut down the
+same way any other relay error is (see `tunnel.zig`'s `pump`).
+
+Writes are not bounded by any of this — only reads. `ConnectionPool` used
+to carry a `last_activity_at` timestamp per slot, written on `acquire()`
+but read by nothing; there was no reaper. It's been removed rather than
+wired up: a real reaper needs the pool to hold a live `net.Stream` handle
+per slot plus cross-task-safe shutdown coordination, which is a larger and
+riskier change than a per-read idle timeout justifies. The per-read timeout
+already closes the actual gap — a connection sitting open, sending
+nothing, forever, pinning a slot and up to two worker threads — across
+header-parsing, HTTP relay, and CONNECT splicing, on both the client and
+upstream leg.
 
 ## Telemetry
 
@@ -250,7 +279,11 @@ socket we control, not a stdlib-internal connect path.
   `incr`/`decr`/`add`/`get` are all single atomic ops on a shared pointer;
   no per-request allocation or locking. `upstream_connect_errors` is
   incremented in `forward.zig`/`tunnel.zig` on the `resolver.connect(...)
-  catch` branch, right before the client gets its 502.
+  catch` branch, right before the client gets its 502. `relay_errors`
+  covers any post-connect relay failure, including idle-timeout teardowns
+  (see I/O model → Timeouts) — `tunnel.zig`'s `pump()` used to swallow
+  these silently; it now logs and counts them like every other relay
+  error.
 - **Export** (`telemetry/reporter.zig`): `Metrics.snapshot()` returns a
   `[Counter.count]u64` (one atomic `load` per counter, not a consistent
   point-in-time view). When `Config.metrics_interval_ms` is non-zero,
