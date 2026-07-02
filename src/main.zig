@@ -22,6 +22,11 @@ pub fn main(init: std.process.Init) !void {
 
     var telemetry: zroute.Telemetry = .init(node_prefix);
 
+    var metrics_group: Io.Group = .init;
+    if (cfg.metricsInterval()) |interval| {
+        metrics_group.async(io, zroute.telemetry.reporter.run, .{ &telemetry.metrics, interval, io });
+    }
+
     var pool: zroute.ConnectionPool = try .init(gpa, cfg.max_connections);
 
     const dns_servers = try gpa.alloc(Io.net.IpAddress, cfg.dns_servers.len);

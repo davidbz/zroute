@@ -8,6 +8,7 @@ const relay = @import("relay.zig");
 const Resolver = @import("resolver.zig").Resolver;
 const log = @import("log.zig");
 const TraceId = @import("../telemetry/span.zig").TraceId;
+const Metrics = @import("../telemetry/metrics.zig").Metrics;
 
 /// Handles a CONNECT request: resolves and connects to the target, replies
 /// with a tunnel-established response, then splices raw bytes in both
@@ -18,6 +19,7 @@ pub fn handle(
     client_stream: net.Stream,
     io: Io,
     resolver: Resolver,
+    metrics: *Metrics,
     trace_id: TraceId,
     slot: u32,
 ) !void {
@@ -41,6 +43,7 @@ pub fn handle(
         .mode = .stream,
         .protocol = .tcp,
     }) catch |e| {
+        metrics.incr(.upstream_connect_errors);
         log.warn(trace_id, slot, "upstream connect failed host={s} port={d} err={t}", .{
             target.host, target.port, e,
         });

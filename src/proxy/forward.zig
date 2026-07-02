@@ -8,6 +8,7 @@ const relay = @import("relay.zig");
 const Resolver = @import("resolver.zig").Resolver;
 const log = @import("log.zig");
 const TraceId = @import("../telemetry/span.zig").TraceId;
+const Metrics = @import("../telemetry/metrics.zig").Metrics;
 
 /// RFC 7230 6.1 hop-by-hop headers: meaningful only for one transport leg,
 /// never forwarded to the next one. Everything else (including
@@ -56,6 +57,7 @@ pub fn handle(
     request: *http.Server.Request,
     io: Io,
     resolver: Resolver,
+    metrics: *Metrics,
     trace_id: TraceId,
     slot: u32,
 ) !void {
@@ -85,6 +87,7 @@ pub fn handle(
         .mode = .stream,
         .protocol = .tcp,
     }) catch |e| {
+        metrics.incr(.upstream_connect_errors);
         log.warn(trace_id, slot, "upstream connect failed host={s} port={d} err={t}", .{
             parsed.target.host, parsed.target.port, e,
         });
