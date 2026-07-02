@@ -13,9 +13,10 @@ const TraceId = @import("../telemetry/span.zig").TraceId;
 const Metrics = @import("../telemetry/metrics.zig").Metrics;
 
 /// RFC 7230 6.1 hop-by-hop headers: meaningful only for one transport leg,
-/// never forwarded to the next one. Everything else (including
-/// content-length/transfer-encoding, which we mirror rather than strip)
-/// passes through unchanged.
+/// never forwarded to the next one. Everything else passes through
+/// unchanged, except Content-Length, which writeFilteredHeaders drops
+/// whenever Transfer-Encoding: chunked is also present (see forwardRequest /
+/// relayResponse) to avoid CL.TE / TE.CL request-smuggling desyncs.
 const hop_by_hop_headers = [_][]const u8{
     "connection",
     "proxy-connection",
@@ -42,10 +43,17 @@ fn findHeaderValue(request: *http.Server.Request, name: []const u8) ?[]const u8 
     return null;
 }
 
-fn writeFilteredHeaders(w: *Io.Writer, head_buffer: []const u8) !void {
+/// `strip_content_length` must be set whenever the message also carries
+/// Transfer-Encoding: chunked. RFC 7230 §3.3.3 requires the chunked framing
+/// to win, but an upstream that resolves CL/TE conflicts differently than we
+/// do could desync on a smuggled request/response hidden past the boundary
+/// implied by the other header — so the ambiguous header is dropped instead
+/// of relayed.
+fn writeFilteredHeaders(w: *Io.Writer, head_buffer: []const u8, strip_content_length: bool) !void {
     var it = http.HeaderIterator.init(head_buffer);
     while (it.next()) |h| {
         if (isHopByHop(h.name)) continue;
+        if (strip_content_length and std.ascii.eqlIgnoreCase(h.name, "content-length")) continue;
         try w.print("{s}: {s}\r\n", .{ h.name, h.value });
     }
 }
@@ -105,12 +113,12 @@ pub fn handle(
     var upstream_writer = upstream.writer(io, &upstream_write_buf);
 
     try forwardRequest(request, &upstream_writer.interface, parsed.path);
-    try relayResponse(request, &upstream_reader.interface);
+    try relayResponse(request, &upstream_reader.interface, trace_id, slot);
 }
 
 fn forwardRequest(request: *http.Server.Request, w: *Io.Writer, path: []const u8) !void {
     try w.print("{s} {s} HTTP/1.1\r\n", .{ @tagName(request.head.method), path });
-    try writeFilteredHeaders(w, request.head_buffer);
+    try writeFilteredHeaders(w, request.head_buffer, request.head.transfer_encoding == .chunked);
     try w.writeAll("Connection: close\r\n\r\n");
     try w.flush();
 
@@ -123,7 +131,7 @@ fn forwardRequest(request: *http.Server.Request, w: *Io.Writer, path: []const u8
     try w.flush();
 }
 
-fn relayResponse(request: *http.Server.Request, upstream_in: *Io.Reader) !void {
+fn relayResponse(request: *http.Server.Request, upstream_in: *Io.Reader, trace_id: TraceId, slot: u32) !void {
     var upstream_head: http.Reader = .{
         .in = upstream_in,
         .interface = undefined,
@@ -131,11 +139,19 @@ fn relayResponse(request: *http.Server.Request, upstream_in: *Io.Reader) !void {
         .max_head_len = upstream_in.buffer.len,
     };
     const head_bytes = upstream_head.receiveHead() catch |e| return timeout_reader.unwrap(upstream_in, e);
-    const resp_head = try http.Client.Response.Head.parse(head_bytes);
+    const resp_head = http.Client.Response.Head.parse(head_bytes) catch |e| {
+        // Malformed upstream response head (e.g. conflicting duplicate
+        // Content-Length, non-final chunked, duplicate Transfer-Encoding).
+        // Nothing has been written to the client yet, so reject cleanly
+        // instead of relaying an ambiguous framing downstream.
+        log.warn(trace_id, slot, "malformed upstream response head err={t}", .{e});
+        try request.respond("Bad Gateway", .{ .status = .bad_gateway, .keep_alive = false });
+        return;
+    };
 
     const client_out = request.server.out;
     try client_out.print("{t} {d} {s}\r\n", .{ resp_head.version, @intFromEnum(resp_head.status), resp_head.reason });
-    try writeFilteredHeaders(client_out, head_bytes);
+    try writeFilteredHeaders(client_out, head_bytes, resp_head.transfer_encoding == .chunked);
     try client_out.writeAll("Connection: close\r\n\r\n");
 
     if (resp_head.transfer_encoding == .chunked) {
@@ -161,15 +177,84 @@ test "isHopByHop matches RFC 7230 hop-by-hop headers case-insensitively" {
 }
 
 test "writeFilteredHeaders strips hop-by-hop headers and forwards the rest" {
-    const head = "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\nX-Custom: yes\r\n\r\n";
+    const head = "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\nContent-Length: 5\r\nX-Custom: yes\r\n\r\n";
 
     var out_buf: [256]u8 = undefined;
     var writer: Io.Writer = .fixed(&out_buf);
 
-    try writeFilteredHeaders(&writer, head);
+    try writeFilteredHeaders(&writer, head, false);
     const written = writer.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, written, "Host: example.com\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "X-Custom: yes\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "Content-Length: 5\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "Connection") == null);
+}
+
+test "writeFilteredHeaders drops Content-Length when asked to strip it" {
+    const head = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+    var out_buf: [256]u8 = undefined;
+    var writer: Io.Writer = .fixed(&out_buf);
+
+    try writeFilteredHeaders(&writer, head, true);
+    const written = writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, written, "Content-Length") == null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "Transfer-Encoding: chunked\r\n") != null);
+}
+
+// Empirical check for the smuggling-relevant question: does std.http.Server's
+// head parser (the same one `Server.receiveHead` uses) reject a request that
+// carries both Content-Length and Transfer-Encoding? As of Zig 0.16.0, no —
+// the two fields are populated independently with no cross-check, so a
+// CL.TE-ambiguous request head parses cleanly. That is exactly the case
+// writeFilteredHeaders's strip_content_length guards against above: we must
+// not blindly relay both headers to upstream.
+test "std.http.Server.Request.Head.parse does not reject conflicting CL+TE" {
+    const head = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 100\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const parsed = try http.Server.Request.Head.parse(head);
+    try std.testing.expectEqual(@as(?u64, 100), parsed.content_length);
+    try std.testing.expectEqual(http.TransferEncoding.chunked, parsed.transfer_encoding);
+}
+
+test "forwardRequest strips Content-Length from the upstream head when Transfer-Encoding is chunked" {
+    const client_head = "POST /x HTTP/1.1\r\nHost: example.com\r\nContent-Length: 100\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+
+    var client_in: Io.Reader = .fixed(client_head);
+    var client_out_buf: [256]u8 = undefined;
+    var client_out: Io.Writer = .fixed(&client_out_buf);
+    var server: http.Server = .init(&client_in, &client_out);
+    var request = try server.receiveHead();
+
+    // Sanity: the client head we crafted is indeed the CL+TE-ambiguous case.
+    try std.testing.expectEqual(@as(?u64, 100), request.head.content_length);
+    try std.testing.expectEqual(http.TransferEncoding.chunked, request.head.transfer_encoding);
+
+    var upstream_buf: [512]u8 = undefined;
+    var upstream_out: Io.Writer = .fixed(&upstream_buf);
+    try forwardRequest(&request, &upstream_out, "/x");
+
+    const forwarded = upstream_out.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Content-Length") == null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Transfer-Encoding: chunked\r\n") != null);
+    // Chunked body is still relayed verbatim.
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "5\r\nhello\r\n0\r\n\r\n") != null);
+}
+
+test "relayResponse rejects a malformed upstream response head with 502 instead of relaying it" {
+    const client_head = "GET /x HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    var client_in: Io.Reader = .fixed(client_head);
+    var client_out_buf: [256]u8 = undefined;
+    var client_out: Io.Writer = .fixed(&client_out_buf);
+    var server: http.Server = .init(&client_in, &client_out);
+    var request = try server.receiveHead();
+
+    const upstream_head = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\nbody";
+    var upstream_in: Io.Reader = .fixed(upstream_head);
+
+    try relayResponse(&request, &upstream_in, 0, 0);
+
+    const written = client_out.buffered();
+    try std.testing.expect(std.mem.startsWith(u8, written, "HTTP/1.1 502 "));
 }
