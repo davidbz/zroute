@@ -66,6 +66,7 @@ pub fn handle(
         return;
     };
     defer upstream.close(io);
+    log.debug(trace_id, slot, "upstream connected host={s} port={d}", .{ target.host, target.port });
 
     try request.respond("", .{
         .status = .ok,
@@ -137,7 +138,9 @@ fn splice(
 /// a normal way for a tunnel to end, not a bug, but previously vanished
 /// silently here; it's now logged and counted like every other relay error.
 fn pump(r: *Io.Reader, w: *Io.Writer, peer: net.Stream, io: Io, metrics: *Metrics, trace_id: TraceId, slot: u32, direction: []const u8) void {
-    if (relay.copyUntilEof(r, w)) |_| {} else |e| {
+    if (relay.copyUntilEof(r, w)) |n| {
+        log.debug(trace_id, slot, "tunnel relay closed dir={s} bytes={d}", .{ direction, n });
+    } else |e| {
         log.warn(trace_id, slot, "tunnel relay error dir={s} err={t}", .{ direction, timeout_reader.unwrap(r, e) });
         metrics.incr(.relay_errors);
     }
