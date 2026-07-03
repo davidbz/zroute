@@ -9,6 +9,7 @@ pub const Counter = enum {
     upstream_connect_errors,
     relay_errors,
     tunnel_concurrency_errors,
+    egress_denied,
 
     pub const count = @typeInfo(Counter).@"enum".fields.len;
 };

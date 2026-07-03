@@ -2,12 +2,11 @@ const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
 const HostName = net.HostName;
+const egress = @import("egress.zig");
 
-/// Default-first: `.system` delegates straight to `HostName.connect`, which
-/// already does DNS lookup + connect + address-racing via the OS resolver
-/// (`/etc/resolv.conf`) — zero extra code. Only overridden to `.custom` when
-/// `Config.dns_servers` is non-empty, since stdlib has no way to point
-/// `HostName.connect` at specific nameservers.
+/// Default-first: `.system` uses the OS resolver (`/etc/resolv.conf`).
+/// Only overridden to `.custom` when `Config.dns_servers` is non-empty,
+/// since stdlib has no way to point address lookup at specific nameservers.
 pub const Resolver = union(enum) {
     system,
     custom: CustomResolver,
@@ -17,13 +16,68 @@ pub const Resolver = union(enum) {
         return .{ .custom = .{ .servers = dns_servers, .timeout = timeout } };
     }
 
-    pub fn connect(r: Resolver, host: HostName, io: Io, port: u16, options: net.IpAddress.ConnectOptions) !net.Stream {
+    /// Resolves `host`, then connects to the first candidate address that
+    /// passes `policy`. The deny check runs against the *resolved* IP, not
+    /// the hostname — a DNS answer that rebinds a public-looking name to a
+    /// denied range (loopback/link-local/RFC1918/ULA/multicast) is caught
+    /// here, not before resolution, where a DNS-rebind bypass would slip
+    /// past a hostname-only check.
+    ///
+    /// `error.EgressDenied` means every resolved address was denied by
+    /// policy. If at least one address passed the policy but none of them
+    /// could be connected to, `error.UnknownHostName` is returned.
+    pub fn connect(r: Resolver, host: HostName, io: Io, port: u16, options: net.IpAddress.ConnectOptions, policy: egress.Policy) !net.Stream {
+        var addr_buf: [16]net.IpAddress = undefined;
+        const addrs = try r.resolveAddresses(io, host, &addr_buf);
+
+        var any_allowed = false;
+        for (addrs) |addr| {
+            if (!policy.allowsTarget(addr)) continue;
+            any_allowed = true;
+            var a = addr;
+            a.setPort(port);
+            return net.IpAddress.connect(&a, io, options) catch continue;
+        }
+        if (!any_allowed) return error.EgressDenied;
+        return error.UnknownHostName;
+    }
+
+    fn resolveAddresses(r: Resolver, io: Io, host: HostName, out: []net.IpAddress) ![]net.IpAddress {
         return switch (r) {
-            .system => HostName.connect(host, io, port, options),
-            .custom => |c| c.connect(host, io, port, options),
+            .system => systemResolve(io, host, out),
+            .custom => |c| c.resolve(io, host, out),
         };
     }
 };
+
+/// Blocking lookup via `HostName.lookup`: the queue's 16-slot capacity is
+/// enough that `lookup` never blocks trying to put a result (per its own
+/// doc comment), so this drains synchronously in the same task rather than
+/// needing a concurrent producer/consumer pair.
+fn systemResolve(io: Io, host: HostName, out: []net.IpAddress) HostName.LookupError![]net.IpAddress {
+    var queue_buf: [16]HostName.LookupResult = undefined;
+    var queue: Io.Queue(HostName.LookupResult) = .init(&queue_buf);
+    const lookup_result = host.lookup(io, &queue, .{ .port = 0 });
+
+    var count: usize = 0;
+    while (queue.getOne(io)) |result| {
+        switch (result) {
+            .address => |addr| {
+                if (count < out.len) {
+                    out[count] = addr;
+                    count += 1;
+                }
+            },
+            .canonical_name => {},
+        }
+    } else |_| {}
+
+    if (count == 0) {
+        try lookup_result;
+        return error.UnknownHostName;
+    }
+    return out[0..count];
+}
 
 /// Queries the configured nameservers in order (guard-clause: try the next
 /// server on any failure or timeout). Reuses stdlib's public DNS
@@ -35,17 +89,6 @@ pub const Resolver = union(enum) {
 pub const CustomResolver = struct {
     servers: []const net.IpAddress,
     timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(3), .clock = .awake } },
-
-    pub fn connect(c: CustomResolver, host: HostName, io: Io, port: u16, options: net.IpAddress.ConnectOptions) !net.Stream {
-        var addr_buf: [8]net.IpAddress = undefined;
-        const addrs = try c.resolve(io, host, &addr_buf);
-        for (addrs) |addr| {
-            var a = addr;
-            a.setPort(port);
-            return net.IpAddress.connect(&a, io, options) catch continue;
-        }
-        return error.UnknownHostName;
-    }
 
     /// Tries each configured server in turn; returns as soon as one answers
     /// with at least one address.

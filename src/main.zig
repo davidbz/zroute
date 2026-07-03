@@ -34,20 +34,22 @@ pub fn main(init: std.process.Init) !void {
         dns_servers[i] = try Io.net.IpAddress.parse(server, 53);
     }
     const resolver = zroute.resolver.Resolver.init(dns_servers, cfg.dnsTimeout());
+    const egress_policy = try cfg.egressPolicy(gpa);
 
     const deps: zroute.connection.Deps = .{
         .pool = &pool,
         .telemetry = &telemetry,
         .resolver = resolver,
         .idle_timeout = cfg.idleTimeout(),
+        .egress_policy = egress_policy,
     };
 
     const listen_address = try cfg.listenAddress();
     var proxy_listener: zroute.listener.Listener = try .init(listen_address, io, &pool, &telemetry, deps);
 
     const resolver_name: []const u8 = if (cfg.dns_servers.len == 0) "system" else "custom";
-    std.log.info("zroute listening on {s}:{d} backend=threaded capacity={d} resolver={s}", .{
-        cfg.listen_host, cfg.listen_port, cfg.max_connections, resolver_name,
+    std.log.info("zroute listening on {s}:{d} backend=threaded capacity={d} resolver={s} egress_deny_private={} connect_port_allowlist_len={d}", .{
+        cfg.listen_host, cfg.listen_port, cfg.max_connections, resolver_name, cfg.egress_deny_private, cfg.connect_allowed_ports.len,
     });
 
     proxy_listener.run(io);
