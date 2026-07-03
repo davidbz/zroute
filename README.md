@@ -15,6 +15,7 @@ fixed-capacity connection pool and no per-connection heap allocation.
 zig build              # compiles to zig-out/bin/zroute
 zig build test         # run unit tests
 zig build check        # fast compile-only check, no binary written
+zig build coverage     # generate a code coverage report (requires kcov), written to zig-out/coverage
 ```
 
 ## Run

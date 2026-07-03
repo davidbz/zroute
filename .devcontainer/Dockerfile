@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y \
     strace \
     ltrace \
     bash-completion \
-    minisign && \
+    minisign \
+    kcov && \
     apt-get autoremove -y && \
     apt-get clean autoclean && \
     rm -rf /var/lib/apt/lists/*

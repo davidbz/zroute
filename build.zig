@@ -142,6 +142,29 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // Runs both test binaries under kcov, writing per-binary results into the
+    // same output directory. kcov auto-merges every subdirectory it finds
+    // there into a combined report under `kcov-merged/`. Requires `kcov` on
+    // PATH (not part of the Zig toolchain).
+    const coverage_step = b.step("coverage", "Generate code coverage report (requires kcov)");
+    const coverage_dir = "zig-out/coverage";
+
+    const kcov_mod = b.addSystemCommand(&.{
+        "kcov",
+        "--include-pattern=src/",
+        b.pathJoin(&.{ coverage_dir, "mod-tests" }),
+    });
+    kcov_mod.addArtifactArg(mod_tests);
+    coverage_step.dependOn(&kcov_mod.step);
+
+    const kcov_exe = b.addSystemCommand(&.{
+        "kcov",
+        "--include-pattern=src/",
+        b.pathJoin(&.{ coverage_dir, "exe-tests" }),
+    });
+    kcov_exe.addArtifactArg(exe_tests);
+    coverage_step.dependOn(&kcov_exe.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

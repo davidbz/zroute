@@ -55,3 +55,40 @@ jobs:
         run: zig build check
       - name: Run tests
         run: zig build test
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - uses: actions/cache@v5
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-0.16.0-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-${{ runner.os }}-0.16.0-
+            zig-${{ runner.os }}-
+      - name: Install kcov
+        run: sudo apt-get update && sudo apt-get install -y kcov
+      - name: Generate coverage report
+        run: zig build coverage
+      - name: Summarize coverage
+        run: |
+          report="zig-out/coverage/kcov-merged/coverage.json"
+          if [ ! -f "$report" ]; then
+            echo "::error::kcov did not produce a merged coverage report at $report"
+            exit 1
+          fi
+          pct=$(python3 -c "import json; print(json.load(open('$report'))['percent_covered'])")
+          echo "Line coverage: ${pct}%"
+          echo "### Code coverage: ${pct}%" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: zig-out/coverage/kcov-merged
