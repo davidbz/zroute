@@ -25,7 +25,7 @@ pub const Resolver = union(enum) {
     ///
     /// `error.EgressDenied` means every resolved address was denied by
     /// policy. If at least one address passed the policy but none of them
-    /// could be connected to, `error.UnknownHostName` is returned.
+    /// could be connected to, `error.AllConnectAttemptsFailed` is returned.
     pub fn connect(r: Resolver, host: HostName, io: Io, port: u16, options: net.IpAddress.ConnectOptions, policy: egress.Policy) !net.Stream {
         var addr_buf: [16]net.IpAddress = undefined;
         const addrs = try r.resolveAddresses(io, host, &addr_buf);
@@ -39,7 +39,7 @@ pub const Resolver = union(enum) {
             return net.IpAddress.connect(&a, io, options) catch continue;
         }
         if (!any_allowed) return error.EgressDenied;
-        return error.UnknownHostName;
+        return error.AllConnectAttemptsFailed;
     }
 
     fn resolveAddresses(r: Resolver, io: Io, host: HostName, out: []net.IpAddress) ![]net.IpAddress {

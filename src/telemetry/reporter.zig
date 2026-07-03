@@ -9,9 +9,13 @@ const log = std.log.scoped(.telemetry);
 
 /// Runs until canceled, waking every `interval` to log one snapshot line.
 /// The only way the write-only counters in `Metrics` ever become observable
-/// at runtime: nothing else reads them back. Callers should spawn this in an
-/// `Io.Group` only when the configured interval is non-zero — `interval` of
-/// `.none` would return from `sleep` immediately and busy-loop.
+/// at runtime: nothing else reads them back. Callers should spawn this only
+/// when the configured interval is non-zero — `interval` of `.none` would
+/// return from `sleep` immediately and busy-loop. Must be spawned via
+/// `Io.concurrent`, never `Io.Group.async`: under `Io.Threaded` a saturated
+/// worker pool (e.g. `async_limit` of 0 on a 1-CPU host) makes `Group.async`
+/// fall back to running the task inline on the caller's thread, and this is
+/// an infinite loop.
 pub fn run(metrics: *const Metrics, interval: Io.Timeout, io: Io) void {
     while (true) {
         interval.sleep(io) catch return;
