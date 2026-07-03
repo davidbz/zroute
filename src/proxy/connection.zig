@@ -43,9 +43,11 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
     defer stream.close(io);
     defer deps.pool.release(slot);
     defer deps.telemetry.metrics.decr(.connections_active);
+    defer log.debug(trace_id, slot, "connection closed", .{});
 
     deps.telemetry.metrics.incr(.connections_total);
     deps.telemetry.metrics.incr(.connections_active);
+    log.debug(trace_id, slot, "accepted from={f}", .{stream.socket.address});
 
     var in_buf: [head_buffer_size]u8 = undefined;
     var out_buf: [relay_buffer_size]u8 = undefined;

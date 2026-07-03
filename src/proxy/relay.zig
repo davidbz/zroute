@@ -34,15 +34,17 @@ pub const ChunkedError = error{InvalidChunkedEncoding};
 /// Copies a `transfer-encoding: chunked` body byte-for-byte — chunk-size
 /// lines, chunk data, and any trailers — without decoding or re-encoding.
 /// The proxy only needs to find where the body ends, not see its content.
-pub fn copyChunkedVerbatim(r: *Io.Reader, w: *Io.Writer) !void {
+pub fn copyChunkedVerbatim(r: *Io.Reader, w: *Io.Writer) !usize {
+    var total: usize = 0;
     while (true) {
         const chunk_len = try feedChunkHead(r, w);
         if (chunk_len == 0) {
             try copyTrailers(r, w);
-            return;
+            return total;
         }
         try r.streamExact64(w, chunk_len);
         try feedChunkSuffix(r, w);
+        total += chunk_len;
     }
 }
 
@@ -88,7 +90,7 @@ test "copyChunkedVerbatim passes through chunk framing byte-for-byte" {
     var out_buf: [128]u8 = undefined;
     var writer: Io.Writer = .fixed(&out_buf);
 
-    try copyChunkedVerbatim(&reader, &writer);
+    _ = try copyChunkedVerbatim(&reader, &writer);
     try std.testing.expectEqualStrings(input, writer.buffered());
 }
 
@@ -99,7 +101,7 @@ test "copyChunkedVerbatim passes through trailers" {
     var out_buf: [128]u8 = undefined;
     var writer: Io.Writer = .fixed(&out_buf);
 
-    try copyChunkedVerbatim(&reader, &writer);
+    _ = try copyChunkedVerbatim(&reader, &writer);
     try std.testing.expectEqualStrings(input, writer.buffered());
 }
 
