@@ -18,11 +18,13 @@ import argparse
 import http.server
 import json
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -67,39 +69,31 @@ class OriginHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class EchoServer:
+class _EchoHandler(socketserver.StreamRequestHandler):
+    def handle(self):
+        while True:
+            data = self.connection.recv(4096)
+            if not data:
+                return
+            self.connection.sendall(data)
+
+
+class EchoServer(socketserver.ThreadingTCPServer):
     """Raw TCP echo server, used as a CONNECT tunnel target."""
 
+    daemon_threads = True
+    allow_reuse_address = True
+
     def __init__(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(("127.0.0.1", 0))
-        self.sock.listen(5)
-        self.port = self.sock.getsockname()[1]
-        self._stop = False
-        self._thread = threading.Thread(target=self._serve, daemon=True)
+        super().__init__(("127.0.0.1", 0), _EchoHandler)
+        self.port = self.server_address[1]
+        self._thread = threading.Thread(target=self.serve_forever, daemon=True)
         self._thread.start()
 
-    def _serve(self):
-        while not self._stop:
-            try:
-                self.sock.settimeout(0.5)
-                conn, _ = self.sock.accept()
-            except (socket.timeout, OSError):
-                continue
-            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
-
-    def _handle(self, conn: socket.socket):
-        with conn:
-            while True:
-                data = conn.recv(4096)
-                if not data:
-                    return
-                conn.sendall(data)
-
     def stop(self):
-        self._stop = True
+        self.shutdown()
+        self.server_close()
         self._thread.join(timeout=2)
-        self.sock.close()
 
 
 class Proxy:
@@ -177,23 +171,27 @@ def split_head_body(response: bytes) -> tuple[bytes, bytes]:
     return head, body
 
 
+def http_get(proxy: Proxy, target_port: int, path: str) -> bytes:
+    return raw_request(
+        proxy.host, proxy.port,
+        f"GET http://127.0.0.1:{target_port}{path} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{target_port}\r\nConnection: close\r\n\r\n".encode(),
+    )
+
+
 # --- test cases -------------------------------------------------------------
 
+@dataclass
 class TestContext:
-    def __init__(self, insecure: Proxy, secure: Proxy, connect_ok: Proxy, origin_port: int, echo: EchoServer):
-        self.insecure = insecure    # egress_deny_private=false, reaches loopback origin
-        self.secure = secure        # default policy, used to prove SSRF guard fires
-        self.connect_ok = connect_ok  # egress_deny_private=false, echo's port allowlisted
-        self.origin_port = origin_port
-        self.echo = echo
+    insecure: Proxy       # egress_deny_private=false, reaches loopback origin
+    secure: Proxy         # default policy, used to prove SSRF guard fires
+    connect_ok: Proxy     # egress_deny_private=false, echo's port allowlisted
+    origin_port: int
+    echo: EchoServer
 
 
 def test_plain_http_get(ctx: TestContext):
-    resp = raw_request(
-        ctx.insecure.host, ctx.insecure.port,
-        f"GET http://127.0.0.1:{ctx.origin_port}/hello HTTP/1.1\r\n"
-        f"Host: 127.0.0.1:{ctx.origin_port}\r\nConnection: close\r\n\r\n".encode(),
-    )
+    resp = http_get(ctx.insecure, ctx.origin_port, "/hello")
     assert status_code(resp) == 200, resp
     assert resp.endswith(b"hello from origin\n"), resp
 
@@ -211,11 +209,7 @@ def test_plain_http_post_echo(ctx: TestContext):
 
 
 def test_plain_http_large_body(ctx: TestContext):
-    resp = raw_request(
-        ctx.insecure.host, ctx.insecure.port,
-        f"GET http://127.0.0.1:{ctx.origin_port}/big HTTP/1.1\r\n"
-        f"Host: 127.0.0.1:{ctx.origin_port}\r\nConnection: close\r\n\r\n".encode(),
-    )
+    resp = http_get(ctx.insecure, ctx.origin_port, "/big")
     assert status_code(resp) == 200, resp[:200]
     _, body = split_head_body(resp)
     assert len(body) == 64 * 1024, len(body)
@@ -223,11 +217,7 @@ def test_plain_http_large_body(ctx: TestContext):
 
 
 def test_plain_http_404_passthrough(ctx: TestContext):
-    resp = raw_request(
-        ctx.insecure.host, ctx.insecure.port,
-        f"GET http://127.0.0.1:{ctx.origin_port}/missing HTTP/1.1\r\n"
-        f"Host: 127.0.0.1:{ctx.origin_port}\r\nConnection: close\r\n\r\n".encode(),
-    )
+    resp = http_get(ctx.insecure, ctx.origin_port, "/missing")
     assert status_code(resp) == 404, resp
 
 
@@ -256,11 +246,7 @@ def test_malformed_request_closes_connection(ctx: TestContext):
 
 
 def test_egress_denied_loopback_http(ctx: TestContext):
-    resp = raw_request(
-        ctx.secure.host, ctx.secure.port,
-        f"GET http://127.0.0.1:{ctx.origin_port}/hello HTTP/1.1\r\n"
-        f"Host: 127.0.0.1:{ctx.origin_port}\r\nConnection: close\r\n\r\n".encode(),
-    )
+    resp = http_get(ctx.secure, ctx.origin_port, "/hello")
     assert status_code(resp) == 403, resp
 
 
@@ -288,11 +274,7 @@ def test_upstream_connection_refused(ctx: TestContext):
     dead_port = closed.getsockname()[1]
     closed.close()  # bound then closed: nothing listens there now
 
-    resp = raw_request(
-        ctx.insecure.host, ctx.insecure.port,
-        f"GET http://127.0.0.1:{dead_port}/hello HTTP/1.1\r\n"
-        f"Host: 127.0.0.1:{dead_port}\r\nConnection: close\r\n\r\n".encode(),
-    )
+    resp = http_get(ctx.insecure, dead_port, "/hello")
     assert status_code(resp) == 502, resp
 
 
@@ -332,42 +314,25 @@ def main() -> int:
 
     echo = EchoServer()
 
-    insecure = Proxy(args.binary, {
-        "listen_host": "127.0.0.1",
-        "listen_port": find_free_port(),
-        "max_connections": 64,
-        "dns_servers": [],
-        "dns_timeout_ms": 3000,
-        "metrics_interval_ms": 0,
-        "idle_timeout_ms": 5000,
-        "egress_deny_private": False,
-        "egress_allow": [],
-        "connect_allowed_ports": [443, 80],
-    }, "insecure")
+    def base_config() -> dict:
+        return {
+            "listen_host": "127.0.0.1",
+            "listen_port": find_free_port(),
+            "max_connections": 64,
+            "dns_servers": [],
+            "dns_timeout_ms": 3000,
+            "metrics_interval_ms": 0,
+            "idle_timeout_ms": 5000,
+            "egress_deny_private": True,
+            "egress_allow": [],
+            "connect_allowed_ports": [443, 80],
+        }
 
-    secure = Proxy(args.binary, {
-        "listen_host": "127.0.0.1",
-        "listen_port": find_free_port(),
-        "max_connections": 64,
-        "dns_servers": [],
-        "dns_timeout_ms": 3000,
-        "metrics_interval_ms": 0,
-        "idle_timeout_ms": 5000,
-        "egress_deny_private": True,
-        "egress_allow": [],
-        "connect_allowed_ports": [443, 80],
-    }, "secure")
-
+    insecure = Proxy(args.binary, {**base_config(), "egress_deny_private": False}, "insecure")
+    secure = Proxy(args.binary, base_config(), "secure")
     connect_ok = Proxy(args.binary, {
-        "listen_host": "127.0.0.1",
-        "listen_port": find_free_port(),
-        "max_connections": 64,
-        "dns_servers": [],
-        "dns_timeout_ms": 3000,
-        "metrics_interval_ms": 0,
-        "idle_timeout_ms": 5000,
+        **base_config(),
         "egress_deny_private": False,
-        "egress_allow": [],
         "connect_allowed_ports": [443, 80, echo.port],
     }, "connect-ok")
 
