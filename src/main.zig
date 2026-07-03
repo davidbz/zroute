@@ -22,10 +22,24 @@ pub fn main(init: std.process.Init) !void {
 
     var telemetry: zroute.Telemetry = .init(node_prefix);
 
-    var metrics_group: Io.Group = .init;
+    // Spawned via `Io.concurrent`, not `Io.Group.async`: `Group.async` falls
+    // back to running the task inline on the caller's thread when the worker
+    // pool is saturated (`async_limit` is 0 on a 1-CPU host), and
+    // `reporter.run` never returns — that would block `proxy_listener.run`
+    // below from ever being reached. `Io.concurrent` instead fails loudly, in
+    // which case we log and keep starting the proxy; a missing metrics
+    // reporter must never prevent the proxy from serving. The future is
+    // never awaited since the reporter runs for the process lifetime, but
+    // the handle is kept alive for the scope of `main` because the spawned
+    // task writes its (never-produced) result through a pointer into it.
+    var reporter_future: ?Io.Future(void) = null;
     if (cfg.metricsInterval()) |interval| {
-        metrics_group.async(io, zroute.telemetry.reporter.run, .{ &telemetry.metrics, interval, io });
+        reporter_future = Io.concurrent(io, zroute.telemetry.reporter.run, .{ &telemetry.metrics, interval, io }) catch |e| blk: {
+            std.log.warn("metrics reporter failed to start, continuing without periodic snapshots err={t}", .{e});
+            break :blk null;
+        };
     }
+    _ = &reporter_future;
 
     var pool: zroute.ConnectionPool = try .init(gpa, cfg.max_connections);
 

@@ -52,7 +52,7 @@ main()
   ├─ config.load(gpa, io, argv)        compiled defaults -> zroute.json -> CLI flags
   ├─ Io.Threaded.init(gpa, .{})        the only working Io backend (see below)
   ├─ Telemetry.init(random_node_prefix)
-  ├─ if cfg.metricsInterval(): metrics_group.async(reporter.run)   opt-in, off by default
+  ├─ if cfg.metricsInterval(): Io.concurrent(reporter.run)   opt-in, off by default
   ├─ ConnectionPool.init(gpa, cfg.max_connections)   one fixed allocation, never grows
   ├─ build dns_servers: []IpAddress    parses cfg.dns_servers, port 53
   ├─ Resolver.init(dns_servers, ...)   .system if empty, .custom otherwise
@@ -146,10 +146,12 @@ client                 listener              connection.handle          tunnel.h
 The splice is two independent byte pumps, not one loop selecting between
 two sockets — `std.Io` has no readiness-multiplexing primitive exposed here,
 so full-duplex traffic needs two blocking readers running concurrently.
-`Io.concurrent` runs the client→upstream pump (falls back to running it
-inline, sequentially, if the runtime can't spin up a concurrent task — see
-`tunnel.zig`'s `splice`), while the calling task runs upstream→client
-directly. Whichever direction hits EOF or an error first calls
+`Io.concurrent` runs the client→upstream pump while the calling task runs
+upstream→client directly. If `Io.concurrent` fails to spawn, the tunnel is
+aborted — both sockets are shut down and `tunnel_concurrency_errors` is
+incremented — rather than falling back to running both pumps sequentially,
+which would deadlock any duplex protocol (see `tunnel.zig`'s `splice`).
+Whichever direction hits EOF or an error first calls
 `Stream.shutdown(io, .both)` on its peer socket rather than `close` —
 `shutdown` is safe to call while another task is blocked in a `read()` on
 that same socket, so it reliably unblocks the other pump instead of leaving
@@ -171,8 +173,8 @@ config file parsing. Two things call into it:
   (`.system` via `HostName.lookup`, or `.custom` UDP) produced the
   addresses. If every candidate address is denied, `connect` returns
   `error.EgressDenied`; if at least one passed the policy but none of them
-  could actually be connected to, it returns `error.UnknownHostName` instead
-  (ordinary connect failure, not a policy outcome).
+  could actually be connected to, it returns `error.AllConnectAttemptsFailed`
+  instead (ordinary connect failure, not a policy outcome).
 - **`tunnel.handle`** additionally checks `Policy.allowsConnectPort` against
   the parsed `CONNECT` target port before any DNS resolution happens at all
   — a cheap rejection for the "wrong port" case that doesn't need a
@@ -265,10 +267,13 @@ worker pool with synchronous fallback:**
 - The tunnel splice's second pump direction uses `Io.concurrent` instead of
   `Io.Group`, which has its own, separate limit (`concurrent_limit`,
   default **unlimited** — it always spawns another worker rather than
-  falling back to inline execution). `tunnel.zig` still codes a fallback
-  path for the rare case `Io.concurrent` fails outright (e.g. thread
-  creation failure), running both pump directions sequentially on the
-  calling thread instead.
+  falling back to inline execution). For the rare case `Io.concurrent` fails
+  outright (e.g. thread creation failure), `tunnel.zig` aborts the tunnel
+  instead of falling back to running both pump directions sequentially on
+  the calling thread: the first pump would block reading from the client
+  until EOF, but a live client won't send EOF until it receives the
+  server's half of the handshake, which is stuck in the second pump that
+  never started — a deadlock, not a degraded mode.
 
 **Reads:** every reader wraps a fixed stack-allocated buffer — 16 KiB for
 parsing the client's request head, 4–64 KiB for relaying bodies/tunneling.
@@ -360,9 +365,15 @@ upstream leg.
 - **Export** (`telemetry/reporter.zig`): `Metrics.snapshot()` returns a
   `[Counter.count]u64` (one atomic `load` per counter, not a consistent
   point-in-time view). When `Config.metrics_interval_ms` is non-zero,
-  `main.zig` spawns `reporter.run` in its own `Io.Group`; it wakes every
-  interval and logs one `name=value ...` line via `formatSnapshot`. Default
-  is `0` (disabled) — this is the only place any counter is ever read back.
+  `main.zig` spawns `reporter.run` via `Io.concurrent`, not `Io.Group.async`
+  — `Group.async` falls back to running the task inline on the caller's
+  thread when the worker pool is saturated, which would block
+  `proxy_listener.run` forever since `reporter.run` never returns. If
+  `Io.concurrent` fails to spawn it, `main.zig` logs a warning and starts
+  the proxy anyway — a missing metrics reporter must never prevent the
+  proxy from serving. It wakes every interval and logs one `name=value ...`
+  line via `formatSnapshot`. Default is `0` (disabled) — this is the only
+  place any counter is ever read back.
 
 ## Zero-allocation hot path
 
