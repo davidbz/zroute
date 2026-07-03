@@ -55,7 +55,7 @@ pub const TimeoutReader = struct {
         const r: *TimeoutReader = @alignCast(@fieldParentPtr("interface", io_r));
 
         var iovecs_buffer: [max_iovecs_len][]u8 = undefined;
-        const dest_n, _ = try io_r.writableVector(&iovecs_buffer, data);
+        const dest_n, const data_size = try io_r.writableVector(&iovecs_buffer, data);
         const dest = iovecs_buffer[0..dest_n];
         std.debug.assert(dest[0].len > 0);
 
@@ -67,11 +67,15 @@ pub const TimeoutReader = struct {
             return error.ReadFailed;
         };
 
-        // `receiveTimeout` fills only `dest[0]` (a single buffer, unlike a
-        // true vectored `readv`), so `n` can never exceed `dest[0].len` —
-        // there's no "spilled into the internal buffer" case to handle here.
+        // `dest[0]` may be our own internal buffer rather than caller data
+        // (e.g. `fillMore`'s empty placeholder) — bytes landing there must
+        // advance `io_r.end`, or they're invisible to `buffered()` forever.
         const n = msg.data.len;
         if (n == 0) return error.EndOfStream;
+        if (n > data_size) {
+            io_r.end += n - data_size;
+            return data_size;
+        }
         return n;
     }
 };
@@ -101,6 +105,38 @@ fn connectedLoopbackPair(io: Io) !struct { server: net.Server, client: net.Strea
 
     const accepted = try server.accept(io);
     return .{ .server = server, .client = client, .accepted = accepted };
+}
+
+test "readVec called via fillMore advances end so a fully-buffered request is visible without a second read" {
+    // Regression test: `fillMore` (which `http.Server.receiveHead` uses)
+    // passes an empty external `data` slice, so the whole read lands in
+    // TimeoutReader's own internal buffer. `readVec` must advance
+    // `io_r.end` by that spillover, or the bytes stay physically buffered
+    // but invisible to `buffered()` — every request would then look
+    // incomplete forever and stall until idle_timeout, no matter how much
+    // data the peer actually sent.
+    const gpa = std.testing.allocator;
+    var threaded: Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var pair = try connectedLoopbackPair(io);
+    defer pair.server.deinit(io);
+    defer pair.client.close(io);
+    defer pair.accepted.close(io);
+
+    var client_write_buf: [64]u8 = undefined;
+    var client_writer = pair.client.writer(io, &client_write_buf);
+    try client_writer.interface.writeAll("hello world");
+    try client_writer.interface.flush();
+
+    var buf: [64]u8 = undefined;
+    var reader: TimeoutReader = .init(pair.accepted, io, &buf, .{
+        .duration = .{ .raw = .fromSeconds(5), .clock = .awake },
+    });
+
+    try reader.interface.fillMore();
+    try std.testing.expectEqualStrings("hello world", reader.interface.buffered());
 }
 
 test "readVec returns IdleTimeout when the peer sends nothing within the deadline" {

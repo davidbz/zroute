@@ -55,3 +55,26 @@ jobs:
         run: zig build check
       - name: Run tests
         run: zig build test
+
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+      - uses: actions/cache@v5
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+            ~/Library/Caches/zig
+          key: zig-${{ runner.os }}-0.16.0-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-${{ runner.os }}-0.16.0-
+            zig-${{ runner.os }}-
+      - name: Build
+        run: zig build
+      - name: Run end-to-end tests
+        run: python3 test/e2e_test.py
