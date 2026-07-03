@@ -14,6 +14,7 @@ const telemetry_mod = @import("../telemetry/telemetry.zig");
 const Telemetry = telemetry_mod.Telemetry;
 const TraceId = telemetry_mod.TraceId;
 const Resolver = @import("resolver.zig").Resolver;
+const egress = @import("egress.zig");
 
 const head_buffer_size = 16 * 1024;
 const relay_buffer_size = 4 * 1024;
@@ -28,6 +29,9 @@ pub const Deps = struct {
     /// Max gap between bytes on any read before the connection is torn down
     /// as stalled. `.none` disables idle enforcement. See `Config.idle_timeout_ms`.
     idle_timeout: Io.Timeout,
+    /// Egress deny policy (link-local/loopback/RFC1918/ULA/multicast +
+    /// CONNECT port allowlist) applied to every resolved target.
+    egress_policy: egress.Policy,
 };
 
 /// Owns one accepted connection end-to-end: parses the request head,
@@ -60,7 +64,7 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
     if (request.head.method == .CONNECT) {
         deps.pool.setState(slot, .tunneling);
         deps.telemetry.metrics.incr(.requests_connect);
-        tunnel.handle(&request, stream, io, deps.resolver, &deps.telemetry.metrics, trace_id, slot, deps.idle_timeout) catch |e| {
+        tunnel.handle(&request, stream, io, deps.resolver, &deps.telemetry.metrics, trace_id, slot, deps.idle_timeout, deps.egress_policy) catch |e| {
             log.warn(trace_id, slot, "tunnel error err={t}", .{e});
             deps.telemetry.metrics.incr(.relay_errors);
         };
@@ -69,7 +73,7 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
 
     deps.pool.setState(slot, .relaying_http);
     deps.telemetry.metrics.incr(.requests_http);
-    forward.handle(&request, io, deps.resolver, &deps.telemetry.metrics, trace_id, slot, deps.idle_timeout) catch |e| {
+    forward.handle(&request, io, deps.resolver, &deps.telemetry.metrics, trace_id, slot, deps.idle_timeout, deps.egress_policy) catch |e| {
         log.warn(trace_id, slot, "forward error err={t}", .{e});
         deps.telemetry.metrics.incr(.relay_errors);
     };

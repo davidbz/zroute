@@ -6,6 +6,7 @@ const net = Io.net;
 const target_mod = @import("target.zig");
 const relay = @import("relay.zig");
 const Resolver = @import("resolver.zig").Resolver;
+const egress = @import("egress.zig");
 const log = @import("log.zig");
 const http_compat = @import("http_compat.zig");
 const timeout_reader = @import("timeout_reader.zig");
@@ -72,6 +73,7 @@ pub fn handle(
     trace_id: TraceId,
     slot: u32,
     idle_timeout: Io.Timeout,
+    egress_policy: egress.Policy,
 ) !void {
     const host_header = findHeaderValue(request, "host");
     const parsed = target_mod.parseHttpTarget(request.head.target, host_header) catch |e| {
@@ -98,7 +100,11 @@ pub fn handle(
     const upstream = resolver.connect(host_name, io, parsed.target.port, .{
         .mode = .stream,
         .protocol = .tcp,
-    }) catch |e| {
+    }, egress_policy) catch |e| {
+        if (e == error.EgressDenied) {
+            try egress.denyEgress(request, metrics, trace_id, slot, "egress denied", parsed.target.host, parsed.target.port);
+            return;
+        }
         metrics.incr(.upstream_connect_errors);
         log.warn(trace_id, slot, "upstream connect failed host={s} port={d} err={t}", .{
             parsed.target.host, parsed.target.port, e,

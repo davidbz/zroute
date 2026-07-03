@@ -26,6 +26,8 @@ src/
     pool.zig                  ConnectionPool: SoA slot table, lock-free free list
     target.zig                 "host:port" / absolute-URI parsing
     resolver.zig                DNS: system resolver, or custom UDP resolver
+    egress.zig                  SSRF egress policy: deny-list + CIDR allowlist,
+                                 CONNECT port allowlist, shared deny-response helper
     forward.zig                 plain HTTP relay (parse -> connect -> relay)
     tunnel.zig                  CONNECT relay (parse -> connect -> splice)
     relay.zig                   shared byte-copy primitives
@@ -54,12 +56,14 @@ main()
   ├─ ConnectionPool.init(gpa, cfg.max_connections)   one fixed allocation, never grows
   ├─ build dns_servers: []IpAddress    parses cfg.dns_servers, port 53
   ├─ Resolver.init(dns_servers, ...)   .system if empty, .custom otherwise
+  ├─ cfg.egressPolicy(gpa)             parses egress_allow CIDRs once; held in Deps for process lifetime
   ├─ Listener.init(listen_address, io, &pool, &telemetry, deps)
   └─ proxy_listener.run(io)            blocks forever; this is the whole program
 ```
 
-Everything the request path touches (`pool`, `telemetry`, `resolver`) is
-built once here and handed down by pointer/value through `connection.Deps`.
+Everything the request path touches (`pool`, `telemetry`, `resolver`,
+`egress_policy`) is built once here and handed down by pointer/value through
+`connection.Deps`.
 Nothing below `main` allocates from `gpa` again — see
 [Zero-allocation hot path](#zero-allocation-hot-path).
 
@@ -79,7 +83,10 @@ client                 listener              connection.handle          forward.
   │                       │                        │ pool.setState(relaying_http)                       │
   │                       │                        │ forward.handle ─────────▶│                          │
   │                       │                        │                          │ parseHttpTarget()        │
-  │                       │                        │                          │ resolver.connect() ─────▶│ TCP connect
+  │                       │                        │                          │ resolver.connect():      │
+  │                       │                        │                          │  resolve → egress.Policy │
+  │                       │                        │                          │  .allowsTarget() per addr│
+  │                       │                        │                          │  → TCP connect ──────────▶│
   │                       │                        │                          │ forwardRequest():        │
   │                       │                        │                          │   write head, flush      │
   │                       │                        │                          │   copy body, flush ─────▶│──▶
@@ -104,6 +111,11 @@ is **not** stripped — it describes the body's actual wire framing, which is
 relayed byte-for-byte (`relay.copyChunkedVerbatim`) rather than decoded and
 re-encoded, so the next hop needs it to parse the body it receives.
 
+If every resolved address is denied by the egress policy, `resolver.connect`
+returns `error.EgressDenied` and `forward.handle` responds `403 Forbidden`
+via `egress.denyEgress` instead of the `502 Bad Gateway` used for an
+ordinary connect failure — see [Egress policy](#egress-policy-ssrf-defense).
+
 ### CONNECT tunnel
 
 ```
@@ -113,7 +125,12 @@ client                 listener              connection.handle          tunnel.h
   │                       │                        │ pool.setState(tunneling) │                          │
   │                       │                        │ tunnel.handle ──────────▶│                          │
   │                       │                        │                          │ parseConnectTarget()     │
-  │                       │                        │                          │ resolver.connect() ─────▶│ TCP connect
+  │                       │                        │                          │ egress.Policy            │
+  │                       │                        │                          │  .allowsConnectPort()    │
+  │                       │                        │                          │ resolver.connect():      │
+  │                       │                        │                          │  resolve → egress.Policy │
+  │                       │                        │                          │  .allowsTarget() per addr│
+  │                       │                        │                          │  → TCP connect ──────────▶│
   │◀──200 Connection Established───────────────────────────────────────────────│                          │
   │                       │                        │                          │ splice():                │
   │                       │                        │                          │  ┌─ Io.concurrent ───────▶│ task A: client → upstream
@@ -137,6 +154,60 @@ directly. Whichever direction hits EOF or an error first calls
 `shutdown` is safe to call while another task is blocked in a `read()` on
 that same socket, so it reliably unblocks the other pump instead of leaving
 it stuck until its own side happens to close.
+
+## Egress policy (SSRF defense)
+
+`egress.zig` is a self-contained policy module: it classifies `IpAddress`
+values and CONNECT ports, and knows nothing about resolvers, sockets, or
+config file parsing. Two things call into it:
+
+- **`resolver.connect`** (`resolver.zig`) applies `Policy.allowsTarget` to
+  every address returned by DNS resolution, *before* attempting a TCP
+  connect, and only to that resolved list — never to the hostname string
+  itself. Checking the hostname would be bypassable by DNS rebinding: an
+  attacker-controlled name that resolves to a public IP at request-parse
+  time but a denied one (e.g. `169.254.169.254`) at connect time. Denying
+  post-resolution closes that gap regardless of which resolver path
+  (`.system` via `HostName.lookup`, or `.custom` UDP) produced the
+  addresses. If every candidate address is denied, `connect` returns
+  `error.EgressDenied`; if at least one passed the policy but none of them
+  could actually be connected to, it returns `error.UnknownHostName` instead
+  (ordinary connect failure, not a policy outcome).
+- **`tunnel.handle`** additionally checks `Policy.allowsConnectPort` against
+  the parsed `CONNECT` target port before any DNS resolution happens at all
+  — a cheap rejection for the "wrong port" case that doesn't need a
+  resolved address to decide.
+
+Both denial paths — and the equivalent one in `forward.handle` — converge on
+`egress.denyEgress`: increment the `egress_denied` metric, log the reason,
+and respond `403 Forbidden`. One shared function instead of three separate
+count/log/respond blocks, since all three are the same terminal action for
+different trigger conditions.
+
+**Classification** (`isDeniedRange` / `isDeniedIp4` / `isDeniedIp6`): denies
+loopback, link-local (including `169.254.169.254`, the cloud metadata
+endpoint reachable from inside most cloud VMs/containers), RFC1918/ULA
+private ranges, and multicast, by default. IPv4-mapped IPv6 addresses
+(`::ffff:a.b.c.d`) are unwrapped via `net.Ip4Address.fromIp6` and classified
+as IPv4 first — otherwise an attacker could reach a denied IPv4 range
+through its IPv6-mapped form, since the raw IPv6 bytes alone don't look like
+any denied IPv6 range.
+
+**Allowlist** (`AllowEntry`, hand-rolled CIDR match): `Config.egress_allow`
+carves out specific ranges that bypass `deny_private` even though they fall
+inside a denied range (e.g. permit `10.0.0.0/8` while still denying loopback
+and link-local). Parsed once in `Config.egressPolicy` at startup, not
+per-connection — the policy handed to every connection task is a plain
+value (`[]const AllowEntry` slice + two `bool`/`[]u16` fields), no
+allocation or parsing on the hot path.
+
+`Config.listen_host` defaults to `127.0.0.1` for the same underlying reason
+this module exists: `zroute` has no built-in authentication, so an
+unrestricted egress policy on a publicly reachable listener is a ready-made
+open SSRF relay. All three defaults (loopback-only bind, private-range
+egress deny, CONNECT port allowlist) are restrictive out of the box;
+loosening any of them is an explicit config opt-in — see
+[README → Security defaults](README.md#security-defaults).
 
 ## ConnectionPool: data-oriented slot table
 
@@ -275,15 +346,17 @@ upstream leg.
   → resolve → connect → relay/tunnel → close) across log output alone.
 - **Metrics** (`telemetry/metrics.zig`): one process-wide `Metrics` struct —
   a struct-of-arrays of atomic counters (`connections_total/active/rejected`,
-  `requests_http/connect`, `upstream_connect_errors`, `relay_errors`).
-  `incr`/`decr`/`add`/`get` are all single atomic ops on a shared pointer;
-  no per-request allocation or locking. `upstream_connect_errors` is
-  incremented in `forward.zig`/`tunnel.zig` on the `resolver.connect(...)
-  catch` branch, right before the client gets its 502. `relay_errors`
-  covers any post-connect relay failure, including idle-timeout teardowns
-  (see I/O model → Timeouts) — `tunnel.zig`'s `pump()` used to swallow
-  these silently; it now logs and counts them like every other relay
-  error.
+  `requests_http/connect`, `upstream_connect_errors`, `relay_errors`,
+  `egress_denied`). `incr`/`decr`/`add`/`get` are all single atomic ops on a
+  shared pointer; no per-request allocation or locking.
+  `upstream_connect_errors` is incremented in `forward.zig`/`tunnel.zig` on
+  the `resolver.connect(...) catch` branch, right before the client gets its
+  502. `relay_errors` covers any post-connect relay failure, including
+  idle-timeout teardowns (see I/O model → Timeouts) — `tunnel.zig`'s
+  `pump()` used to swallow these silently; it now logs and counts them like
+  every other relay error. `egress_denied` is incremented by
+  `egress.denyEgress`, the shared terminal action for every SSRF-policy
+  rejection — see [Egress policy](#egress-policy-ssrf-defense).
 - **Export** (`telemetry/reporter.zig`): `Metrics.snapshot()` returns a
   `[Counter.count]u64` (one atomic `load` per counter, not a consistent
   point-in-time view). When `Config.metrics_interval_ms` is non-zero,
@@ -305,6 +378,9 @@ general-purpose allocator:
 - The custom DNS resolver (`resolver.zig`) uses fixed-size stack buffers for
   both the query (320 bytes) and response (512 bytes) — no allocation per
   lookup.
+- `egress.Policy` is a plain value (slice + scalars) parsed once from config
+  at startup and copied through `Deps` into every connection task; checking
+  it (`allowsTarget`/`allowsConnectPort`) is pure comparison, no allocation.
 
 ## Configuration layering
 

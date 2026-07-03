@@ -1,8 +1,12 @@
 const std = @import("std");
 const Io = std.Io;
+const egress = @import("proxy/egress.zig");
 
 pub const Config = struct {
-    listen_host: []const u8 = "0.0.0.0",
+    /// Loopback-only by default — binding to a routable address (0.0.0.0 or
+    /// a specific interface) is an explicit opt-in via `--listen`/config,
+    /// since an open listener with no auth is otherwise a public open relay.
+    listen_host: []const u8 = "127.0.0.1",
     listen_port: u16 = 8080,
     max_connections: u32 = 8192,
     /// Empty = use the OS resolver (/etc/resolv.conf) as-is. Non-empty =
@@ -16,6 +20,19 @@ pub const Config = struct {
     /// torn down as stalled (slowloris defense). 0 disables idle enforcement
     /// entirely, restoring unbounded blocking reads.
     idle_timeout_ms: u64 = 60_000,
+    /// Egress SSRF guard: deny proxying to loopback, link-local (incl.
+    /// 169.254.169.254 cloud metadata), RFC1918/ULA, and multicast target
+    /// addresses. `false` restores an unrestricted proxy — the insecure
+    /// choice, documented as such in the README.
+    egress_deny_private: bool = true,
+    /// CIDRs (e.g. "10.0.0.0/8") that bypass `egress_deny_private` even
+    /// though they fall in a normally-denied range. Ignored when
+    /// `egress_deny_private` is false.
+    egress_allow: []const []const u8 = &.{},
+    /// CONNECT destination ports permitted; plain HTTP forwarding is not
+    /// port-restricted. Empty means allow any port — the insecure choice,
+    /// documented as such in the README.
+    connect_allowed_ports: []const u16 = &.{ 443, 80 },
 
     pub fn listenAddress(cfg: Config) !Io.net.IpAddress {
         return Io.net.IpAddress.parse(cfg.listen_host, cfg.listen_port);
@@ -33,6 +50,22 @@ pub const Config = struct {
     pub fn idleTimeout(cfg: Config) Io.Timeout {
         if (cfg.idle_timeout_ms == 0) return .none;
         return msTimeout(cfg.idle_timeout_ms);
+    }
+
+    /// Parses `egress_allow` into CIDR entries and assembles the runtime
+    /// egress policy. `gpa` must outlive the returned policy (it's held for
+    /// the process lifetime, same as everything else built from `Config` in
+    /// `main`).
+    pub fn egressPolicy(cfg: Config, gpa: std.mem.Allocator) !egress.Policy {
+        const allow = try gpa.alloc(egress.AllowEntry, cfg.egress_allow.len);
+        for (cfg.egress_allow, 0..) |text, i| {
+            allow[i] = try egress.AllowEntry.parse(text);
+        }
+        return .{
+            .deny_private = cfg.egress_deny_private,
+            .allow = allow,
+            .connect_ports = cfg.connect_allowed_ports,
+        };
     }
 
     fn msTimeout(ms: u64) Io.Timeout {
@@ -92,6 +125,12 @@ fn dupeConfig(gpa: std.mem.Allocator, src: Config) !Config {
     const servers = try gpa.alloc([]const u8, src.dns_servers.len);
     for (src.dns_servers, 0..) |server, i| servers[i] = try gpa.dupe(u8, server);
     dst.dns_servers = servers;
+
+    const allow = try gpa.alloc([]const u8, src.egress_allow.len);
+    for (src.egress_allow, 0..) |cidr, i| allow[i] = try gpa.dupe(u8, cidr);
+    dst.egress_allow = allow;
+
+    dst.connect_allowed_ports = try gpa.dupe(u16, src.connect_allowed_ports);
     return dst;
 }
 
@@ -158,4 +197,22 @@ test "applyArgs rejects unknown flag" {
 test "applyArgs rejects malformed listen spec" {
     var cfg: Config = .{};
     try std.testing.expectError(error.InvalidArgument, applyArgs(&cfg, &.{ "--listen", "no-colon" }));
+}
+
+test "default config binds loopback-only and denies private egress" {
+    const cfg: Config = .{};
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.listen_host);
+    try std.testing.expect(cfg.egress_deny_private);
+    try std.testing.expectEqualSlices(u16, &.{ 443, 80 }, cfg.connect_allowed_ports);
+}
+
+test "egressPolicy parses the allowlist and carries through the port list" {
+    var cfg: Config = .{};
+    cfg.egress_allow = &.{"10.0.0.0/8"};
+    const policy = try cfg.egressPolicy(std.testing.allocator);
+    defer std.testing.allocator.free(policy.allow);
+
+    try std.testing.expectEqual(@as(usize, 1), policy.allow.len);
+    try std.testing.expect(policy.allowsConnectPort(443));
+    try std.testing.expect(!policy.allowsConnectPort(22));
 }
