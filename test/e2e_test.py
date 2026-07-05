@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
-import os
 import socket
 import socketserver
 import subprocess
@@ -180,6 +179,17 @@ def http_get(proxy: Proxy, target_port: int, path: str) -> bytes:
     )
 
 
+def connect_tunnel(proxy: Proxy, target_port: int) -> socket.socket:
+    sock = socket.create_connection((proxy.host, proxy.port), timeout=CONNECT_TIMEOUT)
+    sock.sendall(f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\nHost: 127.0.0.1:{target_port}\r\n\r\n".encode())
+    sock.settimeout(READ_TIMEOUT)
+    head = b""
+    while b"\r\n\r\n" not in head:
+        head += sock.recv(4096)
+    assert head.startswith(b"HTTP/1.1 200"), head
+    return sock
+
+
 # --- test cases -------------------------------------------------------------
 
 @dataclass
@@ -223,14 +233,7 @@ def test_plain_http_404_passthrough(ctx: TestContext):
 
 
 def test_connect_tunnel_echo(ctx: TestContext):
-    with socket.create_connection((ctx.connect_ok.host, ctx.connect_ok.port), timeout=CONNECT_TIMEOUT) as sock:
-        sock.sendall(f"CONNECT 127.0.0.1:{ctx.echo.port} HTTP/1.1\r\nHost: 127.0.0.1:{ctx.echo.port}\r\n\r\n".encode())
-        sock.settimeout(READ_TIMEOUT)
-        head = b""
-        while b"\r\n\r\n" not in head:
-            head += sock.recv(4096)
-        assert head.startswith(b"HTTP/1.1 200"), head
-
+    with connect_tunnel(ctx.connect_ok, ctx.echo.port) as sock:
         payload = b"ping through the tunnel"
         sock.sendall(payload)
         echoed = b""
@@ -275,20 +278,13 @@ def test_listener_stays_responsive_under_concurrent_tunnels(ctx: TestContext):
     # loop's own thread once the worker pool is saturated - blocking accept()
     # for as long as that one connection lives. Long-lived CONNECT tunnels
     # trigger this reliably. Open enough concurrent tunnels to exceed the
-    # thread pool (sized off CPU count), then confirm a brand new request
-    # still gets served promptly instead of queueing behind them.
-    num_tunnels = min(60, max(40, (os.cpu_count() or 4) * 3))
+    # thread pool, then confirm a brand new request still gets served
+    # promptly instead of queueing behind them.
+    num_tunnels = 50
     sockets = []
     try:
         for _ in range(num_tunnels):
-            sock = socket.create_connection((ctx.connect_ok.host, ctx.connect_ok.port), timeout=CONNECT_TIMEOUT)
-            sock.sendall(f"CONNECT 127.0.0.1:{ctx.echo.port} HTTP/1.1\r\nHost: 127.0.0.1:{ctx.echo.port}\r\n\r\n".encode())
-            sock.settimeout(READ_TIMEOUT)
-            head = b""
-            while b"\r\n\r\n" not in head:
-                head += sock.recv(4096)
-            assert head.startswith(b"HTTP/1.1 200"), head
-            sockets.append(sock)  # left open and idle - ties up a relay thread/task for the rest of the test
+            sockets.append(connect_tunnel(ctx.connect_ok, ctx.echo.port))  # left open and idle - ties up a relay thread/task for the rest of the test
 
         start = time.monotonic()
         resp = http_get(ctx.connect_ok, ctx.origin_port, "/hello")
