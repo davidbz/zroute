@@ -44,3 +44,9 @@ fn handleShutdownSignal(sig: posix.SIG) callconv(.c) void {
     if (fd < 0) return;
     _ = std.os.linux.shutdown(fd, posix.SHUT.RDWR);
 }
+
+/// Clears the stashed fd once the listening socket is closed, so a second
+/// signal landing after teardown can't `shutdown(2)` a reused fd number.
+pub fn reset() void {
+    listen_fd.store(-1, .release);
+}
