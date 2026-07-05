@@ -42,3 +42,5 @@ RUN ARCH=$(uname -m) && \
     && rm /tmp/zig.tar.xz /tmp/zig.tar.xz.minisig
 
 RUN zig version
+
+RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
