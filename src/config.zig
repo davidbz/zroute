@@ -13,9 +13,6 @@ pub const Config = struct {
     /// switch to the custom UDP resolver, querying only these servers.
     dns_servers: []const []const u8 = &.{},
     dns_timeout_ms: u64 = 3_000,
-    /// 0 = disabled: no periodic metrics snapshot is logged. Non-zero starts
-    /// a background task that logs one snapshot line every this many ms.
-    metrics_interval_ms: u64 = 0,
     /// Max gap between bytes on a client or upstream connection before it is
     /// torn down as stalled (slowloris defense). 0 disables idle enforcement
     /// entirely, restoring unbounded blocking reads.
@@ -40,11 +37,6 @@ pub const Config = struct {
 
     pub fn dnsTimeout(cfg: Config) Io.Timeout {
         return msTimeout(cfg.dns_timeout_ms);
-    }
-
-    pub fn metricsInterval(cfg: Config) ?Io.Timeout {
-        if (cfg.metrics_interval_ms == 0) return null;
-        return msTimeout(cfg.metrics_interval_ms);
     }
 
     pub fn idleTimeout(cfg: Config) Io.Timeout {
@@ -156,12 +148,6 @@ fn applyArgs(cfg: *Config, args: []const []const u8) ParseError!void {
             i += 1;
             if (i >= args.len) return error.InvalidArgument;
             cfg.max_connections = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidNumber;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--metrics-interval-ms")) {
-            i += 1;
-            if (i >= args.len) return error.InvalidArgument;
-            cfg.metrics_interval_ms = std.fmt.parseInt(u64, args[i], 10) catch return error.InvalidNumber;
             continue;
         }
         if (std.mem.eql(u8, arg, "--idle-timeout-ms")) {
