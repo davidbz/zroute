@@ -19,7 +19,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
@@ -35,13 +35,13 @@ jobs:
         os: [ubuntu-latest] #os: [ubuntu-latest, ubuntu-latest]
         zig: ["0.16.0"] #zig: ["0.16.0", "master"]   # master catches upstream breakage early
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ matrix.zig }}
       # Cache the Zig build cache to speed up incremental builds.
       # Key includes the zon hash so a dep change busts it correctly.
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             .zig-cache
@@ -60,11 +60,11 @@ jobs:
     name: End-to-end
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.16.0"
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             .zig-cache
