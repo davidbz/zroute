@@ -17,6 +17,7 @@ pub const forward = @import("proxy/forward.zig");
 pub const tunnel = @import("proxy/tunnel.zig");
 pub const connection = @import("proxy/connection.zig");
 pub const listener = @import("proxy/listener.zig");
+pub const shutdown = @import("proxy/shutdown.zig");
 
 pub const Config = config.Config;
 pub const ConnectionPool = pool.ConnectionPool;

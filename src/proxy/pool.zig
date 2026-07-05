@@ -113,6 +113,16 @@ pub const ConnectionPool = struct {
     pub fn setState(pool: *ConnectionPool, slot: u32, state: ConnState) void {
         pool.states[slot].store(state, .release);
     }
+
+    /// True once every slot is idle (no connections in flight). O(capacity)
+    /// scan; only meant to be polled at a coarse interval during a shutdown
+    /// drain, not on any hot path.
+    pub fn isDrained(pool: *const ConnectionPool) bool {
+        for (pool.states) |*s| {
+            if (s.load(.acquire) != .idle) return false;
+        }
+        return true;
+    }
 };
 
 test "acquire/release cycle exhausts and refills capacity" {
@@ -143,6 +153,21 @@ test "released slot state resets to idle" {
     try std.testing.expectEqual(ConnState.accepted, pool.states[slot].load(.monotonic));
     pool.release(slot);
     try std.testing.expectEqual(ConnState.idle, pool.states[slot].load(.monotonic));
+}
+
+test "isDrained is true for an empty pool and false while a slot is held" {
+    const gpa = std.testing.allocator;
+    var pool: ConnectionPool = try .init(gpa, 2);
+    defer pool.deinit(gpa);
+
+    try std.testing.expect(pool.isDrained());
+
+    const addr: Io.net.IpAddress = try .parse("127.0.0.1", 0);
+    const slot = pool.acquire(1, addr) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!pool.isDrained());
+
+    pool.release(slot);
+    try std.testing.expect(pool.isDrained());
 }
 
 test "concurrent acquire/release is ABA-safe under true MPMC stress" {
