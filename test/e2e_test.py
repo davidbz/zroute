@@ -104,13 +104,13 @@ def test_connect_port_not_allowlisted(insecure, echo):
 def test_listener_stays_responsive_under_concurrent_tunnels(
     connect_ok, echo, origin_port
 ):
-    # Listener.run dispatches a connection via Io.Group.async, which
-    # silently runs the task inline on the accept loop's own thread once the
-    # worker pool is saturated - blocking accept() for as long as that one
-    # connection lives. Long-lived CONNECT tunnels trigger this reliably.
-    # Open enough concurrent tunnels to exceed the thread pool, then confirm
-    # a brand new request still gets served promptly instead of queueing
-    # behind them.
+    # Regression guard: Listener.run dispatches each accepted connection via
+    # Io.Group.concurrent specifically so a saturated worker pool never runs
+    # a task inline on the accept loop's own thread - which would block
+    # accept() for as long as that one connection lives. Long-lived CONNECT
+    # tunnels trigger saturation reliably. Open enough concurrent tunnels to
+    # exceed the thread pool, then confirm a brand new request still gets
+    # served promptly instead of queueing behind them.
     num_tunnels = 50
     sockets = []
     try:
