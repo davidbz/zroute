@@ -244,6 +244,12 @@ same slot in between. A full pool (`acquire` returns `null`) makes the
 listener reject the connection immediately (socket closed) rather than
 blocking or growing the table.
 
+**Per-source-IP connection caps are intentionally out of scope:** an
+accurate one needs a hash map (allocation) or an O(`max_connections`) scan
+per `acquire`, neither a clean fit for this allocation-free pool.
+`head_timeout_ms` already covers the slot-pinning case that would motivate
+one.
+
 ## I/O model
 
 **Backend:** `Io.Threaded` is the only backend that works here. `Io.Uring`'s
@@ -603,14 +609,27 @@ defaults](README.md#security-defaults)).
   `CONNECT` establishes an opaque tunnel to an arbitrary TCP service (SMTP
   relays, internal admin ports, ...), where the egress IP check alone
   doesn't constrain which *service* on that IP gets reached.
-- **Slowloris mitigations.** `Config.idle_timeout_ms` (default 60000 ms)
-  bounds the gap between bytes on any client or upstream read — see
-  [Timeouts](#io-model) for the mechanism (`TimeoutReader`, a sliding
-  window, not a total-request budget). This is what keeps a connection that
-  opens and then sends nothing (or trickles bytes deliberately slowly) from
-  pinning a `ConnectionPool` slot — and, per [Memory model](#memory-model),
-  a standing OS thread — indefinitely. Setting `idle_timeout_ms: 0`
-  disables this and restores unbounded blocking reads.
+- **Slowloris mitigations** are two complementary caps on `TimeoutReader`,
+  since a sliding window and an absolute deadline each close a gap the
+  other leaves open:
+  - `Config.idle_timeout_ms` (default 60000 ms) bounds the gap between
+    bytes on any client or upstream read — a sliding window measured fresh
+    from each read, not a total-request budget. This alone stops a
+    connection that opens and sends nothing.
+  - `Config.head_timeout_ms` (default 10000 ms) is an absolute deadline
+    armed only while parsing the request head (`connection.zig` arms it
+    right before `server.receiveHead()` and clears it right after). Without
+    it, a peer trickling a single byte just under the idle window resets
+    the sliding clock forever and holds a `ConnectionPool` slot — and, per
+    [Memory model](#memory-model), a standing OS thread — indefinitely.
+    Because it's cleared once the head is parsed, it never bounds body
+    relay or `CONNECT` tunnel splicing, where long legitimate transfers
+    must not be capped.
+
+  `TimeoutReader.readVec` computes the earlier of the two deadlines per
+  read and surfaces which one fired as a distinct error (`IdleTimeout` vs
+  `HeadTimeout`) so they log separately. Setting either to `0` disables
+  that half; setting both to `0` restores unbounded blocking reads.
 
 ### Egress policy (SSRF defense)
 

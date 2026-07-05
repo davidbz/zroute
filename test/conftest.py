@@ -156,22 +156,27 @@ def find_free_port() -> int:
 # --- raw HTTP helpers over the proxy's TCP socket -------------------------
 
 
+def recv_until_closed(sock: socket.socket, read_timeout: float = READ_TIMEOUT) -> bytes:
+    """Reads until the peer closes or `read_timeout` passes with nothing new."""
+    sock.settimeout(read_timeout)
+    chunks = []
+    try:
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except TimeoutError:
+        pass
+    return b"".join(chunks)
+
+
 def raw_request(
     host: str, port: int, request: bytes, read_timeout: float = READ_TIMEOUT
 ) -> bytes:
     with socket.create_connection((host, port), timeout=CONNECT_TIMEOUT) as sock:
         sock.sendall(request)
-        sock.settimeout(read_timeout)
-        chunks = []
-        try:
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        except TimeoutError:
-            pass
-        return b"".join(chunks)
+        return recv_until_closed(sock, read_timeout)
 
 
 def status_code(response: bytes) -> int:

@@ -14,9 +14,19 @@ pub const Config = struct {
     dns_servers: []const []const u8 = &.{},
     dns_timeout_ms: u64 = 3_000,
     /// Max gap between bytes on a client or upstream connection before it is
-    /// torn down as stalled (slowloris defense). 0 disables idle enforcement
-    /// entirely, restoring unbounded blocking reads.
+    /// torn down as stalled (inter-byte-gap half of the slowloris defense).
+    /// 0 disables idle enforcement entirely, restoring unbounded blocking
+    /// reads. A trickle of single bytes just under this window keeps a
+    /// connection alive indefinitely — see `head_timeout_ms` for the
+    /// absolute cap that closes that gap during head parsing.
     idle_timeout_ms: u64 = 60_000,
+    /// Absolute cap on receiving the request head (from accept until
+    /// `receiveHead` returns), regardless of how the idle window is being
+    /// serviced (other half of the slowloris defense). 0 disables it. Not
+    /// applied to body relay or CONNECT tunnel splicing, where long
+    /// legitimate transfers must not be capped — only `idle_timeout_ms`
+    /// bounds those.
+    head_timeout_ms: u64 = 10_000,
     /// Grace period after SIGTERM/SIGINT during which in-flight connections
     /// are allowed to finish on their own before being force-cancelled. See
     /// "Shutdown semantics" in ARCHITECTURE.md.
@@ -44,8 +54,11 @@ pub const Config = struct {
     }
 
     pub fn idleTimeout(cfg: Config) Io.Timeout {
-        if (cfg.idle_timeout_ms == 0) return .none;
-        return msTimeout(cfg.idle_timeout_ms);
+        return optionalMsTimeout(cfg.idle_timeout_ms);
+    }
+
+    pub fn headTimeout(cfg: Config) Io.Timeout {
+        return optionalMsTimeout(cfg.head_timeout_ms);
     }
 
     /// Parses `egress_allow` into CIDR entries and assembles the runtime
@@ -66,6 +79,11 @@ pub const Config = struct {
 
     fn msTimeout(ms: u64) Io.Timeout {
         return .{ .duration = .{ .raw = .fromMilliseconds(@intCast(ms)), .clock = .awake } };
+    }
+
+    fn optionalMsTimeout(ms: u64) Io.Timeout {
+        if (ms == 0) return .none;
+        return msTimeout(ms);
     }
 };
 
@@ -158,6 +176,12 @@ fn applyArgs(cfg: *Config, args: []const []const u8) ParseError!void {
             i += 1;
             if (i >= args.len) return error.InvalidArgument;
             cfg.idle_timeout_ms = std.fmt.parseInt(u64, args[i], 10) catch return error.InvalidNumber;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--head-timeout-ms")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArgument;
+            cfg.head_timeout_ms = std.fmt.parseInt(u64, args[i], 10) catch return error.InvalidNumber;
             continue;
         }
         if (std.mem.eql(u8, arg, "--shutdown-timeout-ms")) {

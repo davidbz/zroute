@@ -15,11 +15,13 @@ import socket
 import time
 
 from conftest import (
+    CONNECT_TIMEOUT,
     Proxy,
     base_config,
     connect_tunnel,
     http_get,
     raw_request,
+    recv_until_closed,
     split_head_body,
     status_code,
 )
@@ -141,6 +143,87 @@ def test_upstream_connection_refused(insecure):
 
     resp = http_get(insecure, dead_port, "/hello")
     assert status_code(resp) == 502, resp
+
+
+def test_head_timeout_closes_slow_trickle(binary):
+    # head_timeout_ms is an absolute cap on the head-parse phase, separate
+    # from idle_timeout_ms's sliding inter-byte window. Trickle the request
+    # one byte at a time with gaps well under the idle window but whose sum
+    # blows past the (short) head deadline - the connection must be torn
+    # down before the request is ever fully sent.
+    proxy = Proxy(
+        binary,
+        {**base_config(), "idle_timeout_ms": 5000, "head_timeout_ms": 300},
+        "head-timeout-kill",
+    )
+    try:
+        request = b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"
+        sock = socket.create_connection(
+            (proxy.host, proxy.port), timeout=CONNECT_TIMEOUT
+        )
+        try:
+            sent = 0
+            try:
+                for b in request:
+                    sock.sendall(bytes([b]))
+                    sent += 1
+                    time.sleep(
+                        0.05
+                    )  # 33 bytes * 50ms ~= 1.65s, past the 300ms head deadline
+            except OSError:
+                pass  # proxy may have already closed its end
+
+            resp = recv_until_closed(sock)
+        finally:
+            sock.close()
+
+        assert resp == b"", resp
+        assert sent < len(request), (
+            f"sent all {len(request)} bytes before the connection closed - "
+            "head_timeout_ms doesn't appear to be enforced"
+        )
+    finally:
+        proxy.stop()
+
+
+def test_head_timeout_does_not_bound_a_slow_request_body(binary, origin_port):
+    # Once the head is parsed, head_timeout_ms must be cleared - a slow
+    # request body (relayed through the same reader) should only be bound
+    # by the generous idle window, never the short head deadline.
+    proxy = Proxy(
+        binary,
+        {
+            **base_config(),
+            "egress_deny_private": False,
+            "idle_timeout_ms": 5000,
+            "head_timeout_ms": 300,
+        },
+        "head-timeout-body-ok",
+    )
+    try:
+        body = b"trickle"
+        head = (
+            f"POST http://127.0.0.1:{origin_port}/echo HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{origin_port}\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+        ).encode()
+        sock = socket.create_connection(
+            (proxy.host, proxy.port), timeout=CONNECT_TIMEOUT
+        )
+        try:
+            sock.sendall(head)  # arrives in one shot, well inside the head deadline
+            for b in body:
+                sock.sendall(bytes([b]))
+                time.sleep(0.05)  # 7 bytes * 50ms = 350ms, past the 300ms head deadline
+
+            resp = recv_until_closed(sock)
+        finally:
+            sock.close()
+
+        assert status_code(resp) == 200, resp
+        assert resp.endswith(body), resp
+    finally:
+        proxy.stop()
 
 
 def test_graceful_shutdown_drains_open_tunnel(binary, echo):
