@@ -127,6 +127,7 @@ pub const CustomResolver = struct {
             const msg = try socket.receiveTimeout(io, &resp_buf, deadline);
             if (!server.eql(&msg.from)) continue;
             if (!isValidResponse(msg.data, txid)) continue;
+            if (!questionMatches(msg.data, host)) continue;
             return parseAAnswers(msg.data, out);
         }
     }
@@ -172,15 +173,39 @@ fn buildQuery(host: HostName, buf: []u8, io: Io) QueryError![]const u8 {
 /// Rejects anything that isn't plausibly a reply to our own query: too
 /// short to hold a header, wrong transaction ID (the primary spoofing
 /// defense — an off-path attacker guessing this is what we rely on), not
-/// marked as a response, or a nonzero RCODE. Flags live in bytes [2..4]:
-/// bit 15 is QR, the low nibble is RCODE.
+/// marked as a response, a nonzero RCODE, or truncated (TC bit). A
+/// truncated response was clipped to fit one 512-byte UDP datagram, so
+/// trusting it would silently hand back a partial answer set instead of
+/// falling through to the next configured server. Flags live in bytes
+/// [2..4]: bit 15 is QR, bit 9 is TC, the low nibble is RCODE.
 fn isValidResponse(packet: []const u8, txid: u16) bool {
     if (packet.len < 12) return false;
     if (std.mem.readInt(u16, packet[0..2], .big) != txid) return false;
     const flags = std.mem.readInt(u16, packet[2..4], .big);
     const qr_set = flags & 0x8000 != 0;
+    const truncated = flags & 0x0200 != 0;
     const rcode = flags & 0x000f;
-    return qr_set and rcode == 0;
+    return qr_set and !truncated and rcode == 0;
+}
+
+/// Confirms the response's question section echoes the query we sent:
+/// same QNAME (case-insensitive, per DNS 0x20) and QTYPE=A/QCLASS=IN.
+/// Without this, a same-txid response answering a different question
+/// (e.g. an off-path attacker guessing the 16-bit ID against a resolver
+/// that also happens to answer other in-flight queries) would be
+/// accepted. Reuses `HostName.expand` to decompress the QNAME rather than
+/// duplicating label-parsing logic.
+fn questionMatches(packet: []const u8, host: HostName) bool {
+    if (packet.len < 12) return false;
+    if (std.mem.readInt(u16, packet[4..6], .big) == 0) return false;
+    var name_buf: [HostName.max_len]u8 = undefined;
+    const consumed, const qname = HostName.expand(packet, 12, &name_buf) catch return false;
+    if (!HostName.eql(qname, host)) return false;
+    const qtype_off = 12 + consumed;
+    if (packet.len < qtype_off + 4) return false;
+    const qtype = std.mem.readInt(u16, packet[qtype_off..][0..2], .big);
+    const qclass = std.mem.readInt(u16, packet[qtype_off + 2 ..][0..2], .big);
+    return qtype == 1 and qclass == 1;
 }
 
 /// Walks the answer section, keeping only `A` records, decoding each 4-byte
@@ -248,6 +273,13 @@ test "isValidResponse checks length, txid, QR bit, and RCODE" {
     try std.testing.expect(!isValidResponse(packet[0..4], 0x1234));
 }
 
+test "isValidResponse rejects a truncated (TC bit) response" {
+    var packet: [12]u8 = @splat(0);
+    std.mem.writeInt(u16, packet[0..2], 0x1234, .big);
+    std.mem.writeInt(u16, packet[2..4], 0x8200, .big); // QR=1, TC=1, RCODE=0
+    try std.testing.expect(!isValidResponse(&packet, 0x1234));
+}
+
 test "parseAAnswers decodes a canned A-record response" {
     var packet: [512]u8 = undefined;
     var w: usize = 0;
@@ -302,4 +334,45 @@ test "parseAAnswers decodes a canned A-record response" {
     const n = try parseAAnswers(packet[0..w], &out);
     try std.testing.expectEqual(@as(usize, 1), n);
     try std.testing.expectEqualSlices(u8, &.{ 93, 184, 216, 34 }, &out[0].ip4.bytes);
+}
+
+test "questionMatches rejects a same-txid response answering a different question" {
+    var packet: [512]u8 = undefined;
+    var w: usize = 0;
+
+    std.mem.writeInt(u16, packet[0..2], 0x1234, .big);
+    std.mem.writeInt(u16, packet[2..4], 0x8180, .big); // QR=1, RCODE=0
+    std.mem.writeInt(u16, packet[4..6], 1, .big); // QDCOUNT
+    std.mem.writeInt(u16, packet[6..8], 0, .big);
+    std.mem.writeInt(u16, packet[8..10], 0, .big);
+    std.mem.writeInt(u16, packet[10..12], 0, .big);
+    w = 12;
+
+    // Question: attacker.com A IN — a different name than what we asked for.
+    const other_host = try HostName.init("attacker.com");
+    var labels = std.mem.splitScalar(u8, other_host.bytes, '.');
+    while (labels.next()) |label| {
+        packet[w] = @intCast(label.len);
+        w += 1;
+        @memcpy(packet[w..][0..label.len], label);
+        w += label.len;
+    }
+    packet[w] = 0;
+    w += 1;
+    std.mem.writeInt(u16, packet[w..][0..2], 1, .big); // QTYPE A
+    w += 2;
+    std.mem.writeInt(u16, packet[w..][0..2], 1, .big); // QCLASS IN
+    w += 2;
+
+    // Same txid the query used, so isValidResponse alone would accept it.
+    try std.testing.expect(isValidResponse(packet[0..w], 0x1234));
+
+    // But the question section doesn't match what we actually queried.
+    const queried_host = try HostName.init("example.com");
+    try std.testing.expect(!questionMatches(packet[0..w], queried_host));
+
+    // The genuine question name (case-insensitive) is accepted.
+    const shouting_host = try HostName.init("ATTACKER.COM");
+    try std.testing.expect(questionMatches(packet[0..w], other_host));
+    try std.testing.expect(questionMatches(packet[0..w], shouting_host));
 }
