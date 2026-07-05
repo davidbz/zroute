@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import os
 import socket
 import socketserver
 import subprocess
@@ -268,6 +269,41 @@ def test_connect_port_not_allowlisted(ctx: TestContext):
     assert status_code(resp) == 403, resp
 
 
+def test_listener_stays_responsive_under_concurrent_tunnels(ctx: TestContext):
+    # Regression test: Listener.run used to dispatch each connection via
+    # Io.Group.async, which silently runs the task inline on the accept
+    # loop's own thread once the worker pool is saturated - blocking accept()
+    # for as long as that one connection lives. Long-lived CONNECT tunnels
+    # trigger this reliably. Open enough concurrent tunnels to exceed the
+    # thread pool (sized off CPU count), then confirm a brand new request
+    # still gets served promptly instead of queueing behind them.
+    num_tunnels = min(60, max(40, (os.cpu_count() or 4) * 3))
+    sockets = []
+    try:
+        for _ in range(num_tunnels):
+            sock = socket.create_connection((ctx.connect_ok.host, ctx.connect_ok.port), timeout=CONNECT_TIMEOUT)
+            sock.sendall(f"CONNECT 127.0.0.1:{ctx.echo.port} HTTP/1.1\r\nHost: 127.0.0.1:{ctx.echo.port}\r\n\r\n".encode())
+            sock.settimeout(READ_TIMEOUT)
+            head = b""
+            while b"\r\n\r\n" not in head:
+                head += sock.recv(4096)
+            assert head.startswith(b"HTTP/1.1 200"), head
+            sockets.append(sock)  # left open and idle - ties up a relay thread/task for the rest of the test
+
+        start = time.monotonic()
+        resp = http_get(ctx.connect_ok, ctx.origin_port, "/hello")
+        elapsed = time.monotonic() - start
+
+        assert status_code(resp) == 200, resp
+        assert elapsed < 2.0, (
+            f"accept loop took {elapsed:.2f}s to serve a new request with {num_tunnels} tunnels open "
+            "- looks like a saturated connection got dispatched inline instead of concurrently"
+        )
+    finally:
+        for sock in sockets:
+            sock.close()
+
+
 def test_upstream_connection_refused(ctx: TestContext):
     closed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     closed.bind(("127.0.0.1", 0))
@@ -284,6 +320,7 @@ TESTS = [
     test_plain_http_large_body,
     test_plain_http_404_passthrough,
     test_connect_tunnel_echo,
+    test_listener_stays_responsive_under_concurrent_tunnels,
     test_malformed_request_closes_connection,
     test_egress_denied_loopback_http,
     test_egress_denied_loopback_connect,

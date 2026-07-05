@@ -50,7 +50,23 @@ pub const Listener = struct {
                 continue;
             };
 
-            l.group.async(io, connection.handle, .{ stream, slot, trace_id, io, l.deps });
+            // `Group.concurrent`, not `Group.async`: under `Io.Threaded`,
+            // `Group.async` silently runs the task inline on the caller's
+            // thread once the worker pool is saturated (`async_limit`
+            // reached) instead of queueing or rejecting it. The caller here
+            // is this accept loop, so that fallback would block accept()
+            // for the duration of whatever connection got inlined — fatal
+            // for a proxy, since CONNECT tunnels routinely outlive the
+            // pool's thread budget. `Group.concurrent` fails loudly instead,
+            // so a saturated pool is handled the same way as an exhausted
+            // connection pool: reject this one connection and keep accepting.
+            l.group.concurrent(io, connection.handle, .{ stream, slot, trace_id, io, l.deps }) catch |e| {
+                log.warn("concurrent spawn failed err={t}", .{e});
+                l.telemetry.metrics.incr(.connections_rejected);
+                l.pool.release(slot);
+                stream.close(io);
+                continue;
+            };
         }
     }
 };
