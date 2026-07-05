@@ -45,7 +45,6 @@ pub const Listener = struct {
 
             const trace_id = l.telemetry.nextTraceId();
             const slot = l.pool.acquire(trace_id, stream.socket.address) orelse {
-                l.telemetry.metrics.incr(.connections_rejected);
                 stream.close(io);
                 continue;
             };
@@ -55,7 +54,6 @@ pub const Listener = struct {
             // accept loop, which would block it from accepting anything else.
             l.group.concurrent(io, connection.handle, .{ stream, slot, trace_id, io, l.deps }) catch |e| {
                 log.warn("concurrent spawn failed err={t}", .{e});
-                l.telemetry.metrics.incr(.connections_rejected);
                 l.pool.release(slot);
                 stream.close(io);
                 continue;

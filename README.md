@@ -45,7 +45,6 @@ zig-out/bin/zroute --listen 0.0.0.0:8080
 | `--config <path>` | Load configuration from a JSON file. |
 | `--listen <host:port>` | Address to listen on. |
 | `--max-connections <n>` | Maximum concurrent connections. |
-| `--metrics-interval-ms <n>` | Log a metrics snapshot every `n` ms. `0` (default) disables it. |
 | `--idle-timeout-ms <n>` | Tear down a connection after `n` ms with no bytes read (slowloris defense). `0` disables idle enforcement. |
 
 CLI flags override values from a config file, which override compiled-in
@@ -64,7 +63,6 @@ to override.
   "max_connections": 8192,
   "dns_servers": ["1.1.1.1", "1.0.0.1"],
   "dns_timeout_ms": 3000,
-  "metrics_interval_ms": 0,
   "idle_timeout_ms": 60000,
   "egress_deny_private": true,
   "egress_allow": [],
@@ -104,8 +102,7 @@ infrastructure. Three defaults address that:
     IPv6 ULA `fc00::/7`)
   - multicast (`224.0.0.0/4`, `ff00::/8`)
 
-  A denied target gets a `403 Forbidden` and increments the `egress_denied`
-  metric. Set `egress_deny_private: false` to run `zroute` as a fully
+  A denied target gets a `403 Forbidden`. Set `egress_deny_private: false` to run `zroute` as a fully
   unrestricted proxy — **this is the insecure choice**; only do it if the
   proxy's network is already trusted/isolated. To carve out a specific
   exception without disabling the whole policy, add its CIDR to

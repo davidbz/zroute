@@ -1,7 +1,6 @@
 const std = @import("std");
 const net = std.Io.net;
 const http = std.http;
-const Metrics = @import("../telemetry/metrics.zig").Metrics;
 const TraceId = @import("../telemetry/span.zig").TraceId;
 const log = @import("log.zig");
 
@@ -93,17 +92,15 @@ pub const Policy = struct {
 
 /// Shared terminal action for every egress-deny path (CONNECT port not
 /// allowlisted, resolved address denied for CONNECT, resolved address denied
-/// for plain HTTP forwarding): count it, log it, and respond 403.
+/// for plain HTTP forwarding): log it and respond 403.
 pub fn denyEgress(
     request: *http.Server.Request,
-    metrics: *Metrics,
     trace_id: TraceId,
     slot: u32,
     reason: []const u8,
     host: []const u8,
     port: u16,
 ) !void {
-    metrics.incr(.egress_denied);
     log.warn(trace_id, slot, "{s} host={s} port={d}", .{ reason, host, port });
     try request.respond("Forbidden", .{ .status = .forbidden, .keep_alive = false });
 }

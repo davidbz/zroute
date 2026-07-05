@@ -12,7 +12,6 @@ const http_compat = @import("http_compat.zig");
 const timeout_reader = @import("timeout_reader.zig");
 const TimeoutReader = timeout_reader.TimeoutReader;
 const TraceId = @import("../telemetry/span.zig").TraceId;
-const Metrics = @import("../telemetry/metrics.zig").Metrics;
 
 /// RFC 7230 6.1 hop-by-hop headers: meaningful only for one transport leg,
 /// never forwarded to the next one. Everything else passes through
@@ -69,7 +68,6 @@ pub fn handle(
     request: *http.Server.Request,
     io: Io,
     resolver: Resolver,
-    metrics: *Metrics,
     trace_id: TraceId,
     slot: u32,
     idle_timeout: Io.Timeout,
@@ -102,10 +100,9 @@ pub fn handle(
         .protocol = .tcp,
     }, egress_policy) catch |e| {
         if (e == error.EgressDenied) {
-            try egress.denyEgress(request, metrics, trace_id, slot, "egress denied", parsed.target.host, parsed.target.port);
+            try egress.denyEgress(request, trace_id, slot, "egress denied", parsed.target.host, parsed.target.port);
             return;
         }
-        metrics.incr(.upstream_connect_errors);
         log.warn(trace_id, slot, "upstream connect failed host={s} port={d} err={t}", .{
             parsed.target.host, parsed.target.port, e,
         });

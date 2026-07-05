@@ -34,10 +34,8 @@ src/
     timeout_reader.zig          Io.Reader over a stream with a sliding idle deadline
     log.zig                     trace_id/slot-tagged structured logging
   telemetry/
-    telemetry.zig              bundles Metrics + trace-id generation
+    telemetry.zig              trace-id generation
     span.zig                    TraceId type + generator
-    metrics.zig                  atomic counters + snapshot()
-    reporter.zig                 periodic snapshot -> log line
 ```
 
 Each file has one job. `forward.zig` and `tunnel.zig` both do
@@ -52,7 +50,6 @@ main()
   ├─ config.load(gpa, io, argv)        compiled defaults -> zroute.json -> CLI flags
   ├─ Io.Threaded.init(gpa, .{})        the only working Io backend (see below)
   ├─ Telemetry.init(random_node_prefix)
-  ├─ if cfg.metricsInterval(): Io.concurrent(reporter.run)   opt-in, off by default
   ├─ ConnectionPool.init(gpa, cfg.max_connections)   one fixed allocation, never grows
   ├─ build dns_servers: []IpAddress    parses cfg.dns_servers, port 53
   ├─ Resolver.init(dns_servers, ...)   .system if empty, .custom otherwise
@@ -181,10 +178,9 @@ config file parsing. Two things call into it:
   resolved address to decide.
 
 Both denial paths — and the equivalent one in `forward.handle` — converge on
-`egress.denyEgress`: increment the `egress_denied` metric, log the reason,
-and respond `403 Forbidden`. One shared function instead of three separate
-count/log/respond blocks, since all three are the same terminal action for
-different trigger conditions.
+`egress.denyEgress`: log the reason and respond `403 Forbidden`. One shared
+function instead of three separate log/respond blocks, since all three are
+the same terminal action for different trigger conditions.
 
 **Classification** (`isDeniedRange` / `isDeniedIp4` / `isDeniedIp6`): denies
 loopback, link-local (including `169.254.169.254`, the cloud metadata
@@ -233,8 +229,7 @@ acquire/release — a stale head word read by one thread can never
 spuriously CAS-match after other threads have popped and re-pushed the
 same slot in between. A full pool (`acquire`
 returns `null`) makes the listener reject the connection immediately
-(`connections_rejected` metric, socket closed) rather than blocking or
-growing the table.
+(socket closed) rather than blocking or growing the table.
 
 ## I/O model
 
@@ -349,31 +344,9 @@ upstream leg.
   log line for a connection with `trace_id=... slot=...`, so
   `grep trace_id=<x>` reconstructs one request's full path (accept → parse
   → resolve → connect → relay/tunnel → close) across log output alone.
-- **Metrics** (`telemetry/metrics.zig`): one process-wide `Metrics` struct —
-  a struct-of-arrays of atomic counters (`connections_total/active/rejected`,
-  `requests_http/connect`, `upstream_connect_errors`, `relay_errors`,
-  `egress_denied`). `incr`/`decr`/`add`/`get` are all single atomic ops on a
-  shared pointer; no per-request allocation or locking.
-  `upstream_connect_errors` is incremented in `forward.zig`/`tunnel.zig` on
-  the `resolver.connect(...) catch` branch, right before the client gets its
-  502. `relay_errors` covers any post-connect relay failure, including
-  idle-timeout teardowns (see I/O model → Timeouts) — `tunnel.zig`'s
-  `pump()` used to swallow these silently; it now logs and counts them like
-  every other relay error. `egress_denied` is incremented by
-  `egress.denyEgress`, the shared terminal action for every SSRF-policy
-  rejection — see [Egress policy](#egress-policy-ssrf-defense).
-- **Export** (`telemetry/reporter.zig`): `Metrics.snapshot()` returns a
-  `[Counter.count]u64` (one atomic `load` per counter, not a consistent
-  point-in-time view). When `Config.metrics_interval_ms` is non-zero,
-  `main.zig` spawns `reporter.run` via `Io.concurrent`, not `Io.Group.async`
-  — `Group.async` falls back to running the task inline on the caller's
-  thread when the worker pool is saturated, which would block
-  `proxy_listener.run` forever since `reporter.run` never returns. If
-  `Io.concurrent` fails to spawn it, `main.zig` logs a warning and starts
-  the proxy anyway — a missing metrics reporter must never prevent the
-  proxy from serving. It wakes every interval and logs one `name=value ...`
-  line via `formatSnapshot`. Default is `0` (disabled) — this is the only
-  place any counter is ever read back.
+
+There is no metrics/counters subsystem at the moment — request lifecycle
+events are only observable via the structured logs above.
 
 ## Zero-allocation hot path
 
@@ -384,8 +357,8 @@ general-purpose allocator:
 - Connection identity is a `u32` slot, not a heap object.
 - Read/write buffers (`in_buf`, `out_buf`, `upstream_read_buf`,
   `upstream_write_buf`) are stack arrays sized per call.
-- `TraceId` generation and `Metrics` updates are atomics on pre-allocated,
-  process-wide arrays.
+- `TraceId` generation is an atomic on a pre-allocated, process-wide
+  counter.
 - The custom DNS resolver (`resolver.zig`) uses fixed-size stack buffers for
   both the query (320 bytes) and response (512 bytes) — no allocation per
   lookup.
@@ -402,7 +375,7 @@ compiled-in Config{} defaults
 JSON file (std.json.parseFromSlice, missing fields keep their default)
         │
         ▼
-CLI flags (--listen, --max-connections, --metrics-interval-ms; unknown flags are a hard error)
+CLI flags (--listen, --max-connections, --idle-timeout-ms; unknown flags are a hard error)
 ```
 
 Each layer only needs to mention the fields it wants to change; later

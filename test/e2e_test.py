@@ -354,7 +354,6 @@ def main() -> int:
             "max_connections": 64,
             "dns_servers": [],
             "dns_timeout_ms": 3000,
-            "metrics_interval_ms": 0,
             "idle_timeout_ms": 5000,
             "egress_deny_private": True,
             "egress_allow": [],
