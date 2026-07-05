@@ -61,5 +61,6 @@ pub fn main(init: std.process.Init) !void {
         std.log.warn("drain timeout exceeded, force-cancelling remaining connections", .{});
     }
     proxy_listener.deinit(io);
+    zroute.shutdown.reset();
     pool.deinit(gpa);
 }
