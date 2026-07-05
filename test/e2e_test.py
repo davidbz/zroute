@@ -158,14 +158,18 @@ def test_head_timeout_closes_slow_trickle(binary):
     )
     try:
         request = b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"
-        sock = socket.create_connection((proxy.host, proxy.port), timeout=CONNECT_TIMEOUT)
+        sock = socket.create_connection(
+            (proxy.host, proxy.port), timeout=CONNECT_TIMEOUT
+        )
         try:
             sent = 0
             try:
                 for b in request:
                     sock.sendall(bytes([b]))
                     sent += 1
-                    time.sleep(0.05)  # 33 bytes * 50ms ~= 1.65s, past the 300ms head deadline
+                    time.sleep(
+                        0.05
+                    )  # 33 bytes * 50ms ~= 1.65s, past the 300ms head deadline
             except OSError:
                 pass  # proxy may have already closed its end
 
@@ -203,7 +207,9 @@ def test_head_timeout_does_not_bound_a_slow_request_body(binary, origin_port):
             f"Host: 127.0.0.1:{origin_port}\r\n"
             f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
         ).encode()
-        sock = socket.create_connection((proxy.host, proxy.port), timeout=CONNECT_TIMEOUT)
+        sock = socket.create_connection(
+            (proxy.host, proxy.port), timeout=CONNECT_TIMEOUT
+        )
         try:
             sock.sendall(head)  # arrives in one shot, well inside the head deadline
             for b in body:
