@@ -108,15 +108,28 @@ pub fn denyEgress(
 /// IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are unwrapped and classified
 /// as their IPv4 form first — otherwise a target could dodge the IPv4 deny
 /// ranges (e.g. `::ffff:169.254.169.254`) just by being resolved to that
-/// form instead of a bare A record.
+/// form instead of a bare A record. NAT64 (`64:ff9b::/96`) and 6to4
+/// (`2002::/16`) also embed an IPv4 address, just not in the low 32 bits that
+/// `fromIp6` unwraps — check both the embedded v4 and the v6 form itself.
 fn isDeniedRange(addr: net.IpAddress) bool {
     return switch (addr) {
         .ip4 => |a| isDeniedIp4(a.bytes),
         .ip6 => |a| if (net.Ip4Address.fromIp6(a)) |mapped|
             isDeniedIp4(mapped.bytes)
+        else if (embeddedIp4(a.bytes)) |embedded|
+            isDeniedIp4(embedded) or isDeniedIp6(a.bytes)
         else
             isDeniedIp6(a.bytes),
     };
+}
+
+/// Extracts the IPv4 address embedded in a NAT64 (`64:ff9b::/96`, RFC 6052)
+/// or 6to4 (`2002::/16`, RFC 3056) address, if `b` is one of those forms.
+fn embeddedIp4(b: [16]u8) ?[4]u8 {
+    const nat64_prefix = [_]u8{ 0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0 };
+    if (std.mem.eql(u8, b[0..12], &nat64_prefix)) return b[12..16].*;
+    if (b[0] == 0x20 and b[1] == 0x02) return b[2..6].*;
+    return null;
 }
 
 fn isDeniedIp4(b: [4]u8) bool {
@@ -124,9 +137,11 @@ fn isDeniedIp4(b: [4]u8) bool {
     if (b[0] == 127) return true; // loopback
     if (b[0] == 169 and b[1] == 254) return true; // link-local
     if (b[0] == 10) return true; // RFC1918
+    if (b[0] == 100 and b[1] >= 64 and b[1] <= 127) return true; // CGNAT RFC6598 100.64.0.0/10
     if (b[0] == 172 and b[1] >= 16 and b[1] <= 31) return true; // RFC1918
     if (b[0] == 192 and b[1] == 168) return true; // RFC1918
     if (b[0] >= 224 and b[0] <= 239) return true; // multicast
+    if (b[0] >= 240) return true; // reserved/broadcast (240.0.0.0/4, 255.255.255.255)
     return false;
 }
 
@@ -186,6 +201,36 @@ test "IPv4-mapped IPv6 metadata address is still denied" {
         .port = 80,
     } };
     try std.testing.expect(!policy.allowsTarget(addr));
+}
+
+test "denies CGNAT (RFC 6598) at its boundaries but allows just outside them" {
+    const policy: Policy = .{};
+    try std.testing.expect(!policy.allowsTarget(ip4(100, 64, 0, 1, 80)));
+    try std.testing.expect(!policy.allowsTarget(ip4(100, 127, 255, 254, 80)));
+    try std.testing.expect(policy.allowsTarget(ip4(100, 63, 0, 1, 80)));
+}
+
+test "denies reserved Class E and the limited broadcast address" {
+    const policy: Policy = .{};
+    try std.testing.expect(!policy.allowsTarget(ip4(240, 0, 0, 1, 80)));
+    try std.testing.expect(!policy.allowsTarget(ip4(255, 255, 255, 255, 80)));
+}
+
+test "NAT64-embedded and 6to4-embedded metadata addresses are denied" {
+    const policy: Policy = .{};
+    // 64:ff9b::169.254.169.254
+    const nat64: net.IpAddress = .{ .ip6 = .{
+        .bytes = .{ 0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, 169, 254, 169, 254 },
+        .port = 80,
+    } };
+    try std.testing.expect(!policy.allowsTarget(nat64));
+
+    // 2002:a9fe:a9fe:: (6to4 wrapping 169.254.169.254)
+    const sixToFour: net.IpAddress = .{ .ip6 = .{
+        .bytes = .{ 0x20, 0x02, 169, 254, 169, 254, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        .port = 80,
+    } };
+    try std.testing.expect(!policy.allowsTarget(sixToFour));
 }
 
 test "CONNECT port allowlist rejects a non-allowlisted port by default" {
