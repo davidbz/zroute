@@ -50,7 +50,16 @@ pub const Listener = struct {
                 continue;
             };
 
-            l.group.async(io, connection.handle, .{ stream, slot, trace_id, io, l.deps });
+            // `Group.concurrent` (not `.async`) so a saturated worker pool
+            // fails loudly instead of running the connection inline on this
+            // accept loop, which would block it from accepting anything else.
+            l.group.concurrent(io, connection.handle, .{ stream, slot, trace_id, io, l.deps }) catch |e| {
+                log.warn("concurrent spawn failed err={t}", .{e});
+                l.telemetry.metrics.incr(.connections_rejected);
+                l.pool.release(slot);
+                stream.close(io);
+                continue;
+            };
         }
     }
 };
