@@ -99,8 +99,12 @@ infrastructure. Three defaults address that:
   - link-local, including the `169.254.169.254` cloud metadata endpoint
     (`169.254.0.0/16`, `fe80::/10`)
   - private ranges (RFC1918 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`;
-    IPv6 ULA `fc00::/7`)
-  - multicast (`224.0.0.0/4`, `ff00::/8`)
+    CGNAT `100.64.0.0/10`; IPv6 ULA `fc00::/7`)
+  - multicast (`224.0.0.0/4`, `ff00::/8`) and reserved/broadcast
+    (`240.0.0.0/4`, `255.255.255.255`)
+  - IPv4 addresses embedded in IPv6 via IPv4-mapped (`::ffff:a.b.c.d`),
+    NAT64 (`64:ff9b::/96`), or 6to4 (`2002::/16`) forms — checked against
+    the same IPv4 rules above so they can't be used to bypass them
 
   A denied target gets a `403 Forbidden`. Set `egress_deny_private: false` to run `zroute` as a fully
   unrestricted proxy — **this is the insecure choice**; only do it if the
