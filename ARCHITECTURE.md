@@ -59,9 +59,9 @@ Direct answers, expanded in [I/O model](#io-model):
   thread or, if none is idle, calls `std.Thread.spawn` for a new one.
   Threads are never told to exit early — a worker parks on a condition
   variable when it runs out of work and waits to be reused. Nothing shrinks
-  the pool until `Io.Threaded.deinit()` runs (see
-  [Shutdown semantics](#shutdown-semantics) — that call never actually
-  happens in this program today).
+  the pool until `Io.Threaded.deinit()` runs, which it does via `main`'s
+  `defer` on a normal graceful-shutdown return (see [Shutdown
+  semantics](#shutdown-semantics)).
 - **What owns the main event loop?** Nothing does, by design — see the
   "No hidden event loop" commitment above. `Listener.run(io)` is the closest
   thing to a "loop": a single thread blocking on `accept()` in sequence,
@@ -378,9 +378,9 @@ and never resized afterward:
 - `ConnectionPool`: struct-of-arrays over `Config.max_connections` slots
   (`trace_ids`, `remote_addrs`, `states`, `next_free` — see
   [ConnectionPool](#connectionpool-data-oriented-slot-table)). One
-  allocation per array, made once in `main`, freed only at process exit
-  (in practice: never, since the process doesn't exit gracefully — see
-  [Shutdown semantics](#shutdown-semantics)).
+  allocation per array, made once in `main`, freed by `pool.deinit(gpa)`
+  during the graceful-shutdown sequence (see [Shutdown
+  semantics](#shutdown-semantics)).
 - The DNS server address list (`[]Io.net.IpAddress`, parsed from
   `Config.dns_servers` once) and the egress allowlist (`[]egress.AllowEntry`,
   parsed from `Config.egress_allow` once).

@@ -129,3 +129,11 @@ Once running, point a client at the proxy:
 curl -x http://127.0.0.1:8080 http://example.com/
 curl -x http://127.0.0.1:8080 https://example.com/   # CONNECT tunnel
 ```
+
+## Limitations
+
+- Extension HTTP methods (e.g. WebDAV `PROPFIND`/`MKCOL`) aren't proxyable —
+  `std.http.Method` is an exhaustive enum in Zig 0.16, so only its known
+  methods can be parsed and forwarded.
+- A custom resolver (`dns_servers` set) resolves `A` records only; AAAA-only
+  hosts fail under it, while the default system resolver handles both.
