@@ -57,9 +57,29 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
 
     deps.pool.setState(slot, .parsing_head);
     stream_reader.armHeadDeadline(deps.head_timeout);
-    var request = server.receiveHead() catch |e| {
-        log.warn(trace_id, slot, "receive head failed err={t}", .{timeout_reader.unwrap(&stream_reader.interface, e)});
+    const head_buffer = server.reader.receiveHead() catch |e| {
+        const unwrapped = timeout_reader.unwrap(&stream_reader.interface, e);
+        log.warn(trace_id, slot, "receive head failed err={t}", .{unwrapped});
+        // Only an oversized head is cleanly classifiable here (the client is
+        // still speaking HTTP, just over budget); a truncated head, a closed
+        // keep-alive connection, or a raw read failure carry no framing we
+        // could safely answer, so those stay a silent close.
+        if (unwrapped == error.HttpHeadersOversize) {
+            writeMinimalResponse(&stream_writer.interface, "431 Request Header Fields Too Large");
+        }
         return;
+    };
+    var request: http.Server.Request = .{
+        .server = &server,
+        .head_buffer = head_buffer,
+        .head = http.Server.Request.Head.parse(head_buffer) catch |e| {
+            log.warn(trace_id, slot, "receive head failed err={t}", .{e});
+            writeMinimalResponse(&stream_writer.interface, if (e == error.UnknownHttpMethod)
+                "501 Not Implemented"
+            else
+                "400 Bad Request");
+            return;
+        },
     };
     stream_reader.clearHeadDeadline();
 
@@ -77,4 +97,13 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
     forward.handle(&request, io, deps.resolver, trace_id, slot, deps.idle_timeout, deps.egress_policy) catch |e| {
         log.warn(trace_id, slot, "forward error err={t}", .{e});
     };
+}
+
+/// Writes a fixed, bodyless response for a request head that failed to parse
+/// (so `request.respond` isn't available). Best-effort: if the write itself
+/// fails, the caller returns right after and `handle`'s defer closes the
+/// socket anyway.
+fn writeMinimalResponse(w: *std.Io.Writer, status_line: []const u8) void {
+    w.print("HTTP/1.1 {s}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", .{status_line}) catch {};
+    w.flush() catch {};
 }

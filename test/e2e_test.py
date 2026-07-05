@@ -71,10 +71,37 @@ def test_connect_tunnel_echo(connect_ok, echo):
         sock.close()
 
 
-def test_malformed_request_closes_connection(insecure):
-    # No well-formed request line: receiveHead() fails before any
-    # response can be written - proxy just drops the connection.
+def test_unknown_method_gets_501(insecure):
+    # "NOT" isn't one of std.http.Method's 9 known verbs, so the request
+    # line parses far enough to classify it as an unknown method rather
+    # than being generically malformed.
     resp = raw_request(insecure.host, insecure.port, b"NOT A REQUEST\r\n\r\n")
+    assert status_code(resp) == 501, resp
+    assert resp.endswith(b"Content-Length: 0\r\n\r\n"), resp
+
+
+def test_oversized_request_head_gets_431(insecure):
+    # Exactly fills the 16 KiB head buffer with no terminating blank line,
+    # so receiveHead fails with HttpHeadersOversize as soon as the last byte
+    # lands - and, unlike sending *more* than the buffer holds, leaves
+    # nothing unread in the socket for the kernel to RST on close.
+    head_buffer_size = 16 * 1024
+    prefix = b"GET / HTTP/1.1\r\nX-Pad: "
+    oversized = prefix + b"a" * (head_buffer_size - len(prefix))
+    assert len(oversized) == head_buffer_size
+    resp = raw_request(insecure.host, insecure.port, oversized)
+    assert status_code(resp) == 431, resp
+
+
+def test_truncated_request_closes_connection(insecure):
+    # Connection closed mid-header: no complete request line was ever
+    # received, so there's nothing to classify - proxy just drops it.
+    with socket.create_connection(
+        (insecure.host, insecure.port), timeout=CONNECT_TIMEOUT
+    ) as sock:
+        sock.sendall(b"GET / HTTP/1.1\r\n")
+        sock.shutdown(socket.SHUT_WR)
+        resp = recv_until_closed(sock)
     assert resp == b"", resp
 
 
