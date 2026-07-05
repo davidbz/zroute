@@ -29,8 +29,8 @@ jobs:
             artifact: zroute-x86_64-macos
           - target: aarch64-macos         # Apple Silicon
             artifact: zroute-aarch64-macos
-          - target: x86_64-windows-gnu
-            artifact: zroute-x86_64-windows.exe
+          # - target: x86_64-windows-gnu
+          #   artifact: zroute-x86_64-windows.exe
 
     steps:
       - uses: actions/checkout@v7
