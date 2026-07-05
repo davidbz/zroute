@@ -24,3 +24,14 @@ updates:
       timezone: "UTC"
     labels:
       - "dependencies"
+
+  # Keep Python dev dependencies (uv.lock) current.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
