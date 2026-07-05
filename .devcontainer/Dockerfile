@@ -14,10 +14,14 @@ RUN apt-get update && apt-get install -y \
     strace \
     ltrace \
     bash-completion \
+    nodejs \
     minisign && \
     apt-get autoremove -y && \
     apt-get clean autoclean && \
     rm -rf /var/lib/apt/lists/*
+
+# UV
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Persist bash history.
 RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
@@ -42,5 +46,3 @@ RUN ARCH=$(uname -m) && \
     && rm /tmp/zig.tar.xz /tmp/zig.tar.xz.minisig
 
 RUN zig version
-
-RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
