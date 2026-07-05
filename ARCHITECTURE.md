@@ -530,41 +530,46 @@ defense against a spoofed answer.
 
 ## Shutdown semantics
 
-There is currently **no graceful shutdown implemented.** `main`'s call to
-`proxy_listener.run(io)` is the last line of the function and never
-returns — `Listener.run` loops on `accept()` forever, so the process only
-ever stops via external termination (`SIGKILL`, `SIGTERM`'s default
-disposition, a container being torn down, etc.), not via any in-process
-cancellation path. Concretely:
+`SIGTERM`/`SIGINT` trigger a graceful drain: stop accepting new connections
+immediately, let in-flight connections finish on their own up to
+`Config.shutdown_timeout_ms` (default 30s), then force-cancel whatever's
+still running and exit. Concretely:
 
-- **No signal handling.** Nothing in the codebase installs a `SIGINT`/
-  `SIGTERM` handler. There is no code path that decides "stop accepting new
-  connections" in response to anything.
-- **`Listener.deinit` exists but is never called.** It does the right
-  thing if invoked — `l.group.cancel(io)` propagates cancellation to every
-  in-flight connection task before `l.server.deinit(io)` closes the
-  listening socket, so no task is left touching a socket after it returns
-  — but nothing in `main.zig` (or anywhere else) calls it. It reads as
-  scaffolding for a graceful-shutdown path that hasn't been wired up yet,
-  not as dead code to remove.
-- **Active connections and resource cleanup order, if this were wired up:**
-  cancellation would propagate through the `Io.Group` that every connection
-  task belongs to (`Listener.group`), which — per `Io.Group.cancel`'s
-  contract — would deliver `error.Canceled` into each task's next
-  cancellation checkpoint. `connection.handle`'s existing `defer` chain
-  (release pool slot, close socket, log) would still run during unwind, so
-  cleanup ordering is already correct; what's missing is only the trigger.
-  Note that `Io.Threaded`'s worker threads themselves are not joined or
-  reclaimed by this path either — see the standing-thread note in
-  [Memory model](#memory-model) — so `deinit` would still leave the process
-  needing an actual `exit`, not a clean thread-pool teardown.
-- **Practical consequence:** killing the process (however that happens)
-  drops every open connection mid-flight with no attempt at a clean
-  `Connection: close`/tunnel teardown from zroute's side — the peer sees an
-  abrupt TCP reset/close, same as any other unclean process kill. This is
-  worth flagging explicitly to anyone deploying zroute behind an
-  orchestrator that expects `SIGTERM` to drain connections before a
-  harder kill: today, it won't.
+- **Trigger:** `src/proxy/shutdown.zig`'s `install` registers a `sigaction`
+  handler for `SIGTERM`/`SIGINT` (with `SA.RESTART`) that does exactly one
+  thing: call the raw `shutdown(2)` syscall directly on the listening
+  socket's fd (`std.os.linux.shutdown`, bypassing `Io.Threaded`'s own
+  `netShutdown`/`Stream.shutdown` wrappers, which track per-thread
+  cancellation state that a signal handler can't safely re-enter). Per
+  `Io.net.Server.accept`'s documented contract, `shutdown`-ing a listening
+  socket makes any blocked or future `accept()` call return
+  `error.SocketNotListening` — this is an intentional, documented
+  concurrent-cancellation mechanism in the stdlib, not a hack. `SA.RESTART`
+  matters because the signal can land on *any* thread, including one
+  blocked in a live connection's read/write: the kernel transparently
+  resumes that thread's own syscall instead of failing it with `EINTR`,
+  since the handler only ever touches the listening socket's fd.
+- **Accept loop exit:** `Listener.run` (`src/proxy/listener.zig`) treats
+  `error.SocketNotListening` as a clean drain request — it returns instead
+  of logging and looping — rather than the generic "log and keep accepting"
+  treatment every other `accept` error gets.
+- **Drain wait:** `main` (not `Listener`) owns the grace period, because
+  `Io.Group.await`/`Group.cancel` are documented "not threadsafe" to call
+  concurrently from two threads on the same group — only the thread already
+  holding `proxy_listener` may touch `.group`. After `run` returns, `main`
+  polls `ConnectionPool.isDrained()` (an O(capacity) scan of `states[]` for
+  all-`.idle`) on a short interval up to `shutdown_timeout_ms`. Whether or
+  not it drains in time, `main` then calls `proxy_listener.deinit(io)`
+  unconditionally: its `l.group.cancel(io)` is idempotent and a no-op if the
+  group is already empty, or force-cancels any stragglers left after a
+  timed-out drain — either way, `connection.handle`'s existing `defer` chain
+  (release pool slot, close socket, log) runs correctly during unwind.
+- **Worker thread teardown:** because `run` now actually returns, `main`'s
+  `defer threaded.deinit()` finally executes (previously dead code, since
+  `run` never returned). `Io.Threaded.deinit` joins every worker thread —
+  since the drain/cancel sequence above already brought every connection
+  task to completion first, this returns promptly instead of hanging, and
+  the process exits cleanly rather than needing an external `SIGKILL`.
 
 ## Security architecture
 

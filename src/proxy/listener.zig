@@ -33,12 +33,18 @@ pub const Listener = struct {
         l.server.deinit(io);
     }
 
-    /// Accepts connections forever. Guard-clauses on accept/acquire failure
-    /// just log and keep looping — a single bad accept or a momentarily full
-    /// pool never brings the listener down.
+    /// Accepts connections until told to stop. Guard-clauses on accept/acquire
+    /// failure just log and keep looping — a single bad accept or a
+    /// momentarily full pool never brings the listener down. The one
+    /// exception is `error.SocketNotListening`: that's what `accept` returns
+    /// once something has called `shutdown` on the listening socket
+    /// concurrently (see `src/proxy/shutdown.zig`), so it's treated as a
+    /// clean drain request rather than a real error — `run` returns instead
+    /// of logging and continuing.
     pub fn run(l: *Listener, io: Io) void {
         while (true) {
             const stream = l.server.accept(io) catch |e| {
+                if (e == error.SocketNotListening) return;
                 log.warn("accept failed err={t}", .{e});
                 continue;
             };

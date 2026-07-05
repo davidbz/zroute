@@ -41,10 +41,24 @@ pub fn main(init: std.process.Init) !void {
 
     const listen_address = try cfg.listenAddress();
     var proxy_listener: zroute.listener.Listener = try .init(listen_address, io, &pool, &telemetry, deps);
+    zroute.shutdown.install(proxy_listener.server.socket.handle);
 
     std.log.info("zroute listening on {s}:{d} backend=threaded capacity={d} resolver={s} egress_deny_private={} connect_port_allowlist_len={d}", .{
         cfg.listen_host, cfg.listen_port, cfg.max_connections, resolver.kindName(), cfg.egress_deny_private, cfg.connect_allowed_ports.len,
     });
 
     proxy_listener.run(io);
+
+    std.log.info("shutdown requested, draining up to {d}ms", .{cfg.shutdown_timeout_ms});
+    const poll_interval_ms = 50;
+    var waited_ms: u64 = 0;
+    while (!pool.isDrained() and waited_ms < cfg.shutdown_timeout_ms) {
+        Io.sleep(io, .fromMilliseconds(poll_interval_ms), .awake) catch {};
+        waited_ms += poll_interval_ms;
+    }
+    if (!pool.isDrained()) {
+        std.log.warn("drain timeout exceeded, force-cancelling remaining connections", .{});
+    }
+    proxy_listener.deinit(io);
+    pool.deinit(gpa);
 }

@@ -199,6 +199,7 @@ class TestContext:
     connect_ok: Proxy     # egress_deny_private=false, echo's port allowlisted
     origin_port: int
     echo: EchoServer
+    binary: Path          # for tests that need their own short-lived Proxy
 
 
 def test_plain_http_get(ctx: TestContext):
@@ -310,6 +311,70 @@ def test_upstream_connection_refused(ctx: TestContext):
     assert status_code(resp) == 502, resp
 
 
+def test_graceful_shutdown_drains_open_tunnel(ctx: TestContext):
+    # SIGTERM should stop accepting new connections immediately but let an
+    # already-open tunnel keep relaying until it closes on its own, well
+    # inside the configured grace period.
+    proxy = Proxy(ctx.binary, {
+        **base_config(),
+        "egress_deny_private": False,
+        "connect_allowed_ports": [443, 80, ctx.echo.port],
+        "shutdown_timeout_ms": 5000,
+    }, "drain-graceful")
+    try:
+        with connect_tunnel(proxy, ctx.echo.port) as sock:
+            proxy.proc.terminate()  # SIGTERM
+            time.sleep(0.2)  # give the signal handler/accept loop time to react
+
+            # The tunnel opened before shutdown must still work.
+            payload = b"still draining"
+            sock.sendall(payload)
+            echoed = b""
+            while len(echoed) < len(payload):
+                echoed += sock.recv(4096)
+            assert echoed == payload, echoed
+
+        # Tunnel closed client-side; the pool should drain and the process
+        # should exit well before the 5s grace period elapses.
+        proxy.proc.wait(timeout=3)
+        assert proxy.proc.returncode == 0, proxy.log_path.read_text()
+    finally:
+        proxy.stop()
+
+
+def test_shutdown_force_cancels_after_grace_period(ctx: TestContext):
+    # A tunnel that never closes on its own should be force-cancelled once
+    # the (short, test-configured) grace period elapses - not instantly, and
+    # not left hanging on the default 30s.
+    proxy = Proxy(ctx.binary, {
+        **base_config(),
+        "egress_deny_private": False,
+        "connect_allowed_ports": [443, 80, ctx.echo.port],
+        "shutdown_timeout_ms": 500,
+    }, "drain-forced")
+    try:
+        sock = connect_tunnel(proxy, ctx.echo.port)
+        try:
+            start = time.monotonic()
+            proxy.proc.terminate()  # SIGTERM
+            proxy.proc.wait(timeout=4)
+            elapsed = time.monotonic() - start
+
+            assert proxy.proc.returncode == 0, proxy.log_path.read_text()
+            assert elapsed >= 0.35, (
+                f"exited after {elapsed:.2f}s - looks like it force-cancelled "
+                "immediately instead of honoring shutdown_timeout_ms"
+            )
+            assert elapsed < 3.0, (
+                f"exited after {elapsed:.2f}s - looks like it ignored "
+                "shutdown_timeout_ms and hung"
+            )
+        finally:
+            sock.close()
+    finally:
+        proxy.stop()
+
+
 TESTS = [
     test_plain_http_get,
     test_plain_http_post_echo,
@@ -322,7 +387,23 @@ TESTS = [
     test_egress_denied_loopback_connect,
     test_connect_port_not_allowlisted,
     test_upstream_connection_refused,
+    test_graceful_shutdown_drains_open_tunnel,
+    test_shutdown_force_cancels_after_grace_period,
 ]
+
+
+def base_config() -> dict:
+    return {
+        "listen_host": "127.0.0.1",
+        "listen_port": find_free_port(),
+        "max_connections": 64,
+        "dns_servers": [],
+        "dns_timeout_ms": 3000,
+        "idle_timeout_ms": 5000,
+        "egress_deny_private": True,
+        "egress_allow": [],
+        "connect_allowed_ports": [443, 80],
+    }
 
 
 def find_free_port() -> int:
@@ -347,19 +428,6 @@ def main() -> int:
 
     echo = EchoServer()
 
-    def base_config() -> dict:
-        return {
-            "listen_host": "127.0.0.1",
-            "listen_port": find_free_port(),
-            "max_connections": 64,
-            "dns_servers": [],
-            "dns_timeout_ms": 3000,
-            "idle_timeout_ms": 5000,
-            "egress_deny_private": True,
-            "egress_allow": [],
-            "connect_allowed_ports": [443, 80],
-        }
-
     insecure = Proxy(args.binary, {**base_config(), "egress_deny_private": False}, "insecure")
     secure = Proxy(args.binary, base_config(), "secure")
     connect_ok = Proxy(args.binary, {
@@ -368,7 +436,7 @@ def main() -> int:
         "connect_allowed_ports": [443, 80, echo.port],
     }, "connect-ok")
 
-    ctx = TestContext(insecure=insecure, secure=secure, connect_ok=connect_ok, origin_port=origin_port, echo=echo)
+    ctx = TestContext(insecure=insecure, secure=secure, connect_ok=connect_ok, origin_port=origin_port, echo=echo, binary=args.binary)
 
     failures = []
     try:

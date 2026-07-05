@@ -17,6 +17,10 @@ pub const Config = struct {
     /// torn down as stalled (slowloris defense). 0 disables idle enforcement
     /// entirely, restoring unbounded blocking reads.
     idle_timeout_ms: u64 = 60_000,
+    /// Grace period after SIGTERM/SIGINT during which in-flight connections
+    /// are allowed to finish on their own before being force-cancelled. See
+    /// "Shutdown semantics" in ARCHITECTURE.md.
+    shutdown_timeout_ms: u64 = 30_000,
     /// Egress SSRF guard: deny proxying to loopback, link-local (incl.
     /// 169.254.169.254 cloud metadata), RFC1918/ULA, and multicast target
     /// addresses. `false` restores an unrestricted proxy — the insecure
@@ -154,6 +158,12 @@ fn applyArgs(cfg: *Config, args: []const []const u8) ParseError!void {
             i += 1;
             if (i >= args.len) return error.InvalidArgument;
             cfg.idle_timeout_ms = std.fmt.parseInt(u64, args[i], 10) catch return error.InvalidNumber;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--shutdown-timeout-ms")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArgument;
+            cfg.shutdown_timeout_ms = std.fmt.parseInt(u64, args[i], 10) catch return error.InvalidNumber;
             continue;
         }
         return error.InvalidArgument;
