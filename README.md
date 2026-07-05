@@ -45,7 +45,8 @@ zig-out/bin/zroute --listen 0.0.0.0:8080
 | `--config <path>` | Load configuration from a JSON file. |
 | `--listen <host:port>` | Address to listen on. |
 | `--max-connections <n>` | Maximum concurrent connections. |
-| `--idle-timeout-ms <n>` | Tear down a connection after `n` ms with no bytes read (slowloris defense). `0` disables idle enforcement. |
+| `--idle-timeout-ms <n>` | Tear down a connection after `n` ms with no bytes read — inter-byte-gap enforcement, one half of the slowloris defense. `0` disables idle enforcement. |
+| `--head-timeout-ms <n>` | Absolute cap on receiving the request head, other half of the slowloris defense — bounds a peer trickling bytes just under the idle window from holding a slot forever. `0` disables it. |
 
 CLI flags override values from a config file, which override compiled-in
 defaults.
@@ -64,6 +65,7 @@ to override.
   "dns_servers": ["1.1.1.1", "1.0.0.1"],
   "dns_timeout_ms": 3000,
   "idle_timeout_ms": 60000,
+  "head_timeout_ms": 10000,
   "egress_deny_private": true,
   "egress_allow": [],
   "connect_allowed_ports": [443, 80]
@@ -73,8 +75,15 @@ to override.
 - `dns_servers` — empty (default) uses the OS resolver (`/etc/resolv.conf`).
   If set, DNS queries go directly to these servers instead.
 - `idle_timeout_ms` — max gap between bytes on a client or upstream
-  connection before it's torn down as stalled (slowloris defense). `0`
-  disables idle enforcement entirely.
+  connection before it's torn down as stalled: inter-byte-gap enforcement,
+  one half of the slowloris defense. `0` disables idle enforcement
+  entirely. A peer trickling single bytes just under this window keeps a
+  connection alive indefinitely on its own — see `head_timeout_ms`.
+- `head_timeout_ms` — absolute cap on receiving the request head (from
+  accept until the head is fully parsed), regardless of how the idle window
+  is being serviced: the other half of the slowloris defense. Not applied
+  to body relay or `CONNECT` tunnel splicing, where long legitimate
+  transfers must not be capped. `0` disables it.
 
 ## Security defaults
 

@@ -36,6 +36,7 @@ pub fn main(init: std.process.Init) !void {
         .telemetry = &telemetry,
         .resolver = resolver,
         .idle_timeout = cfg.idleTimeout(),
+        .head_timeout = cfg.headTimeout(),
         .egress_policy = egress_policy,
     };
 

@@ -29,6 +29,9 @@ pub const Deps = struct {
     /// Max gap between bytes on any read before the connection is torn down
     /// as stalled. `.none` disables idle enforcement. See `Config.idle_timeout_ms`.
     idle_timeout: Io.Timeout,
+    /// Absolute cap on receiving the request head, on top of `idle_timeout`.
+    /// `.none` disables it. See `Config.head_timeout_ms`.
+    head_timeout: Io.Timeout,
     /// Egress deny policy (link-local/loopback/RFC1918/ULA/multicast +
     /// CONNECT port allowlist) applied to every resolved target.
     egress_policy: egress.Policy,
@@ -53,10 +56,12 @@ pub fn handle(stream: net.Stream, slot: u32, trace_id: TraceId, io: Io, deps: De
     var server: http.Server = .init(&stream_reader.interface, &stream_writer.interface);
 
     deps.pool.setState(slot, .parsing_head);
+    stream_reader.armHeadDeadline(deps.head_timeout);
     var request = server.receiveHead() catch |e| {
         log.warn(trace_id, slot, "receive head failed err={t}", .{timeout_reader.unwrap(&stream_reader.interface, e)});
         return;
     };
+    stream_reader.clearHeadDeadline();
 
     log.debug(trace_id, slot, "{t} {s}", .{ request.head.method, request.head.target });
 
