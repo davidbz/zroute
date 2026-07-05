@@ -42,9 +42,8 @@ pub fn main(init: std.process.Init) !void {
     const listen_address = try cfg.listenAddress();
     var proxy_listener: zroute.listener.Listener = try .init(listen_address, io, &pool, &telemetry, deps);
 
-    const resolver_name: []const u8 = if (cfg.dns_servers.len == 0) "system" else "custom";
     std.log.info("zroute listening on {s}:{d} backend=threaded capacity={d} resolver={s} egress_deny_private={} connect_port_allowlist_len={d}", .{
-        cfg.listen_host, cfg.listen_port, cfg.max_connections, resolver_name, cfg.egress_deny_private, cfg.connect_allowed_ports.len,
+        cfg.listen_host, cfg.listen_port, cfg.max_connections, resolver.kindName(), cfg.egress_deny_private, cfg.connect_allowed_ports.len,
     });
 
     proxy_listener.run(io);

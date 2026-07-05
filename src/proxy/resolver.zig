@@ -16,6 +16,12 @@ pub const Resolver = union(enum) {
         return .{ .custom = .{ .servers = dns_servers, .timeout = timeout } };
     }
 
+    /// Kind name for logging, derived from the active variant rather than
+    /// re-checked against config elsewhere.
+    pub fn kindName(r: Resolver) []const u8 {
+        return @tagName(r);
+    }
+
     /// Resolves `host`, then connects to the first candidate address that
     /// passes `policy`. The deny check runs against the *resolved* IP, not
     /// the hostname — a DNS answer that rebinds a public-looking name to a
