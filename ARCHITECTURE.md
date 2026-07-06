@@ -447,9 +447,14 @@ backpressure signal instead of an approximation.
 - Per-connection stack buffers are sized for the common case (16 KiB
   request heads, 4–64 KiB relay chunks) at compile time. An HTTP request or
   response head larger than 16 KiB is rejected with a clean error
-  (`error.HttpHeadersOversize` → `502`/closed connection) rather than
-  handled via a growable buffer — trading a rare-but-hard failure mode for
-  never needing a heap-backed growth path in the common case.
+  (`error.HttpHeadersOversize`) rather than handled via a growable buffer —
+  trading a rare-but-hard failure mode for never needing a heap-backed
+  growth path in the common case. The response sent to the client differs by
+  which side overflowed: an oversized *client* request head gets `431
+  Request Header Fields Too Large` (`connection.zig`), while an oversized
+  *upstream* response head gets `502 Bad Gateway` (`forward.zig`'s
+  `relayResponse`), since by that point the response is already in flight
+  and 431 wouldn't make sense to the client.
 - Standing thread count (see [I/O model](#io-model)) is a memory cost that
   doesn't show up in the "zero allocation on the hot path" story: every OS
   thread `Io.Threaded` has ever spawned keeps its stack resident until
