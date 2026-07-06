@@ -30,7 +30,7 @@ zig-out/bin/zroute --listen 127.0.0.1:8080
 ```
 
 `zroute` binds loopback-only by default. Binding to `0.0.0.0` (or any other
-routable address) exposes the proxy to the network — since there's no
+routable address) exposes the proxy to the network - since there's no
 built-in authentication, only do this on a network you trust, or in front of
 your own access control (see [Security defaults](#security-defaults)):
 
@@ -45,8 +45,8 @@ zig-out/bin/zroute --listen 0.0.0.0:8080
 | `--config <path>` | Load configuration from a JSON file. |
 | `--listen <host:port>` | Address to listen on. |
 | `--max-connections <n>` | Maximum concurrent connections. |
-| `--idle-timeout-ms <n>` | Tear down a connection after `n` ms with no bytes read — inter-byte-gap enforcement, one half of the slowloris defense. `0` disables idle enforcement. |
-| `--head-timeout-ms <n>` | Absolute cap on receiving the request head, other half of the slowloris defense — bounds a peer trickling bytes just under the idle window from holding a slot forever. `0` disables it. |
+| `--idle-timeout-ms <n>` | Tear down a connection after `n` ms with no bytes read - inter-byte-gap enforcement, one half of the slowloris defense. `0` disables idle enforcement. |
+| `--head-timeout-ms <n>` | Absolute cap on receiving the request head, other half of the slowloris defense - bounds a peer trickling bytes just under the idle window from holding a slot forever. `0` disables it. |
 
 CLI flags override values from a config file, which override compiled-in
 defaults.
@@ -72,14 +72,14 @@ to override.
 }
 ```
 
-- `dns_servers` — empty (default) uses the OS resolver (`/etc/resolv.conf`).
+- `dns_servers` - empty (default) uses the OS resolver (`/etc/resolv.conf`).
   If set, DNS queries go directly to these servers instead.
-- `idle_timeout_ms` — max gap between bytes on a client or upstream
+- `idle_timeout_ms` - max gap between bytes on a client or upstream
   connection before it's torn down as stalled: inter-byte-gap enforcement,
   one half of the slowloris defense. `0` disables idle enforcement
   entirely. A peer trickling single bytes just under this window keeps a
-  connection alive indefinitely on its own — see `head_timeout_ms`.
-- `head_timeout_ms` — absolute cap on receiving the request head (from
+  connection alive indefinitely on its own - see `head_timeout_ms`.
+- `head_timeout_ms` - absolute cap on receiving the request head (from
   accept until the head is fully parsed), regardless of how the idle window
   is being serviced: the other half of the slowloris defense. Not applied
   to body relay or `CONNECT` tunnel splicing, where long legitimate
@@ -87,48 +87,30 @@ to override.
 
 ## Security defaults
 
-`zroute` has no authentication of its own, so its network exposure and the
-set of destinations it will proxy to are the only things standing between a
-client that can reach the listener and an SSRF pivot into internal
-infrastructure. Three defaults address that:
+`zroute` has no built-in authentication, so network exposure and allowed
+destinations are the only guardrails against a client using it as an SSRF
+pivot into internal infrastructure.
 
-- **`listen_host` defaults to `127.0.0.1`.** Binding to a routable address —
-  `0.0.0.0` or a specific interface — is an explicit opt-in via
-  `--listen <host:port>` or the `listen_host` config field. There is no
-  built-in authentication, so a publicly reachable listener is an open relay
-  for anyone who can reach it.
+- **`listen_host` defaults to `127.0.0.1`.** Binding routable (`0.0.0.0` or a
+  specific interface) needs explicit opt-in via `--listen <host:port>` or
+  `listen_host`. No auth means a publicly reachable listener is an open relay.
 
-- **`egress_deny_private` (default `true`) blocks proxying to internal
-  address ranges.** This applies to both `CONNECT` tunnels and plain HTTP
-  forwarding, and — critically — to the *resolved* IP address, not just the
-  hostname in the request. Checking only the hostname would let an attacker
-  bypass the filter via DNS rebinding (resolving an innocuous-looking name to
-  an internal IP after the check). Denied by default:
-  - loopback (`127.0.0.0/8`, `::1`)
-  - link-local, including the `169.254.169.254` cloud metadata endpoint
-    (`169.254.0.0/16`, `fe80::/10`)
-  - private ranges (RFC1918 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`;
-    CGNAT `100.64.0.0/10`; IPv6 ULA `fc00::/7`)
-  - multicast (`224.0.0.0/4`, `ff00::/8`) and reserved/broadcast
-    (`240.0.0.0/4`, `255.255.255.255`)
-  - IPv4 addresses embedded in IPv6 via IPv4-mapped (`::ffff:a.b.c.d`),
-    NAT64 (`64:ff9b::/96`), or 6to4 (`2002::/16`) forms — checked against
-    the same IPv4 rules above so they can't be used to bypass them
+- **`egress_deny_private` (default `true`) blocks CONNECT and plain HTTP to
+  internal address ranges**, checked against the *resolved* IP, not just the
+  hostname, so DNS rebinding can't bypass it. Denied by default: loopback,
+  link-local (incl. `169.254.169.254` cloud metadata), RFC1918/CGNAT/IPv6 ULA
+  private ranges, multicast/reserved/broadcast, and IPv4-in-IPv6 forms
+  (mapped, NAT64, 6to4), checked against the same IPv4 rules. Denied targets
+  get `403 Forbidden`. Set to `false` to run fully unrestricted - **the
+  insecure choice**, only for an already trusted/isolated network. Carve out
+  exceptions instead via `egress_allow` (CIDR list).
 
-  A denied target gets a `403 Forbidden`. Set `egress_deny_private: false` to run `zroute` as a fully
-  unrestricted proxy — **this is the insecure choice**; only do it if the
-  proxy's network is already trusted/isolated. To carve out a specific
-  exception without disabling the whole policy, add its CIDR to
-  `egress_allow` (e.g. `"10.0.0.0/8"` to permit one internal range while
-  still denying loopback/link-local/etc.).
-
-- **`connect_allowed_ports` (default `[443, 80]`) restricts which ports a
-  `CONNECT` tunnel may target.** This only applies to `CONNECT`; plain HTTP
-  forwarding is scoped by the egress deny check alone. Without it, `CONNECT`
-  can be used to reach arbitrary TCP services (SMTP relays on 25, internal
-  admin ports, etc.) through the proxy. An empty list disables the
-  allowlist and permits any port — **the insecure choice**. A rejected port
-  also gets `403 Forbidden` and increments `egress_denied`.
+- **`connect_allowed_ports` (default `[443, 80]`) restricts CONNECT target
+  ports.** Only applies to CONNECT; plain HTTP is scoped by the egress deny
+  check alone. Without it, CONNECT can reach arbitrary TCP services (SMTP,
+  internal admin ports, etc.). Empty list disables the allowlist - **the
+  insecure choice**. A rejected port gets `403 Forbidden` and increments
+  `egress_denied`.
 
 ## Usage
 
@@ -141,7 +123,7 @@ curl -x http://127.0.0.1:8080 https://example.com/   # CONNECT tunnel
 
 ## Limitations
 
-- Extension HTTP methods (e.g. WebDAV `PROPFIND`/`MKCOL`) aren't proxyable —
+- Extension HTTP methods (e.g. WebDAV `PROPFIND`/`MKCOL`) aren't proxyable -
   `std.http.Method` is an exhaustive enum in Zig 0.16, so only its known
   methods can be parsed and forwarded.
 - A custom resolver (`dns_servers` set) resolves `A` records only; AAAA-only
