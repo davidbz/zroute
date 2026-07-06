@@ -93,6 +93,22 @@ def test_oversized_request_head_gets_431(insecure):
     assert status_code(resp) == 431, resp
 
 
+def test_conflicting_duplicate_content_length_gets_400(insecure):
+    # Two Content-Length lines with different values, no Transfer-Encoding:
+    # a CL.CL request-smuggling shape. std.http.Server.Request.Head.parse
+    # rejects any duplicate Content-Length line outright, so the proxy
+    # answers 400 instead of forwarding either value upstream.
+    request = (
+        b"GET http://127.0.0.1:1/ HTTP/1.1\r\n"
+        b"Host: 127.0.0.1:1\r\n"
+        b"Content-Length: 4\r\n"
+        b"Content-Length: 5\r\n"
+        b"Connection: close\r\n\r\n"
+    )
+    resp = raw_request(insecure.host, insecure.port, request)
+    assert status_code(resp) == 400, resp
+
+
 def test_truncated_request_closes_connection(insecure):
     # Connection closed mid-header: no complete request line was ever
     # received, so there's nothing to classify - proxy just drops it.

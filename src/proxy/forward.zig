@@ -240,6 +240,21 @@ test "std.http.Server.Request.Head.parse does not reject conflicting CL+TE" {
     try std.testing.expectEqual(http.TransferEncoding.chunked, parsed.transfer_encoding);
 }
 
+// Empirical check for the CL.CL smuggling-relevant question: does
+// std.http.Server's request head parser reject two Content-Length header
+// lines with conflicting values (no Transfer-Encoding involved)? As of Zig
+// 0.16.0, yes — it rejects *any* duplicate Content-Length line, even one
+// with an identical value, as error.HttpHeadersInvalid. So a client sending
+// conflicting CL.CL never reaches forward.handle(): connection.zig's call to
+// Head.parse already answers 400 and returns first.
+test "std.http.Server.Request.Head.parse rejects duplicate Content-Length, even identical" {
+    const conflicting = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 100\r\nContent-Length: 200\r\n\r\n";
+    try std.testing.expectError(error.HttpHeadersInvalid, http.Server.Request.Head.parse(conflicting));
+
+    const identical = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 100\r\nContent-Length: 100\r\n\r\n";
+    try std.testing.expectError(error.HttpHeadersInvalid, http.Server.Request.Head.parse(identical));
+}
+
 test "forwardRequest strips Content-Length from the upstream head when Transfer-Encoding is chunked" {
     const client_head = "POST /x HTTP/1.1\r\nHost: example.com\r\nContent-Length: 100\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
 
