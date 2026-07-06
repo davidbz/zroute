@@ -70,7 +70,6 @@ jobs:
       - name: Verify artifacts
         run: ls -lh artifacts/
 
-      # Lets downstream users verify the integrity of downloaded binaries.
       - name: Generate checksums
         working-directory: artifacts
         run: sha256sum * > checksums.txt
