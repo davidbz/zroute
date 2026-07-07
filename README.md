@@ -23,20 +23,10 @@ zig build check        # fast compile-only check, no binary written
 zig build run -- --listen 127.0.0.1:8080
 ```
 
-Or run the compiled binary directly:
-
-```bash
-zig-out/bin/zroute --listen 127.0.0.1:8080
-```
-
 `zroute` binds loopback-only by default. Binding to `0.0.0.0` (or any other
 routable address) exposes the proxy to the network - since there's no
 built-in authentication, only do this on a network you trust, or in front of
 your own access control (see [Security defaults](#security-defaults)):
-
-```bash
-zig-out/bin/zroute --listen 0.0.0.0:8080
-```
 
 ### CLI flags
 
