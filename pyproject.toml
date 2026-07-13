@@ -4,7 +4,7 @@ version = "0.0.0"
 requires-python = ">=3.12"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.8", "pyright>=1.1"]
+dev = ["pytest>=8", "ruff>=0.15.21", "pyright>=1.1"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
