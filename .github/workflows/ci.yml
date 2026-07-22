@@ -13,6 +13,9 @@ permissions:
   contents: read
 
 jobs:
+  lint-actions:
+    name: Lint actions
+    uses: raven-actions/actionlint@v2
   fmt:
     name: Format
     runs-on: ubuntu-latest
