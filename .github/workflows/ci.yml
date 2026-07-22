@@ -39,6 +39,14 @@ jobs:
       - name: Pyright
         run: uv run pyright
 
+  lint-actions:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+
   test:
     name: Test / ${{ matrix.os }} / Zig ${{ matrix.zig }}
     runs-on: ${{ matrix.os }}
