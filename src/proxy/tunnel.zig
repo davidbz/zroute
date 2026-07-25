@@ -6,6 +6,7 @@ const net = Io.net;
 const target_mod = @import("target.zig");
 const relay = @import("relay.zig");
 const Resolver = @import("resolver.zig").Resolver;
+const dialer = @import("dialer.zig");
 const egress = @import("egress.zig");
 const log = @import("log.zig");
 const http_compat = @import("http_compat.zig");
@@ -48,7 +49,7 @@ pub fn handle(
 
     // `.timeout` is intentionally left `.none` — see the matching comment in
     // forward.zig for why (a stdlib panic, not an oversight).
-    const upstream = resolver.connect(host_name, io, target.port, .{
+    const upstream = dialer.connect(resolver, host_name, io, target.port, .{
         .mode = .stream,
         .protocol = .tcp,
     }, egress_policy) catch |e| {

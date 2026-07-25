@@ -6,6 +6,7 @@ const net = Io.net;
 const target_mod = @import("target.zig");
 const relay = @import("relay.zig");
 const Resolver = @import("resolver.zig").Resolver;
+const dialer = @import("dialer.zig");
 const egress = @import("egress.zig");
 const log = @import("log.zig");
 const http_compat = @import("http_compat.zig");
@@ -95,7 +96,7 @@ pub fn handle(
     // 0.16.0 stdlib build (Io/Threaded.zig), and there is no `Select`-style
     // primitive yet to build a non-panicking race against `Io.sleep`
     // ourselves without adding latency to the common case.
-    const upstream = resolver.connect(host_name, io, parsed.target.port, .{
+    const upstream = dialer.connect(resolver, host_name, io, parsed.target.port, .{
         .mode = .stream,
         .protocol = .tcp,
     }, egress_policy) catch |e| {
