@@ -26,6 +26,7 @@ src/
     pool.zig                  ConnectionPool: SoA slot table, lock-free free list
     target.zig                 "host:port" / absolute-URI parsing
     resolver.zig                DNS: system resolver, or custom UDP resolver
+    dialer.zig                  resolve -> egress-policy-gated TCP connect
     egress.zig                  SSRF egress policy: deny-list + CIDR allowlist,
                                  CONNECT port allowlist, shared deny-response helper
     forward.zig                 plain HTTP relay (parse -> connect -> relay)
@@ -110,7 +111,7 @@ only steps 4–6 branch on `CONNECT` vs. plain HTTP:
 3. **Parse the request head** — `connection.handle` builds a
    `TimeoutReader`-backed `http.Server` over the accepted stream and calls
    `receiveHead()`.
-4. **DNS resolution** — `resolver.connect` resolves the target hostname
+4. **DNS resolution** — `dialer.connect` resolves the target hostname
    (system or custom resolver — see [DNS architecture](#dns-architecture))
    and filters candidates through the egress policy.
 5. **Establish the upstream connection** — the first policy-allowed address
@@ -136,7 +137,7 @@ client                 listener              connection.handle          forward.
   │                       │                        │ pool.setState(relaying_http)                       │
   │                       │                        │ forward.handle ─────────▶│                          │
   │                       │                        │                          │ parseHttpTarget()        │
-  │                       │                        │                          │ resolver.connect():      │
+  │                       │                        │                          │ dialer.connect():        │
   │                       │                        │                          │  resolve → egress.Policy │
   │                       │                        │                          │  .allowsTarget() per addr│
   │                       │                        │                          │  → TCP connect ──────────▶│
@@ -169,7 +170,7 @@ upstream/downstream pair that resolve that ambiguity differently than
 zroute can't be smuggled a hidden request past the boundary implied by the
 other header.
 
-If every resolved address is denied by the egress policy, `resolver.connect`
+If every resolved address is denied by the egress policy, `dialer.connect`
 returns `error.EgressDenied` and `forward.handle` responds `403 Forbidden`
 via `egress.denyEgress` instead of the `502 Bad Gateway` used for an
 ordinary connect failure — see [Security architecture](#security-architecture).
@@ -185,7 +186,7 @@ client                 listener              connection.handle          tunnel.h
   │                       │                        │                          │ parseConnectTarget()     │
   │                       │                        │                          │ egress.Policy            │
   │                       │                        │                          │  .allowsConnectPort()    │
-  │                       │                        │                          │ resolver.connect():      │
+  │                       │                        │                          │ dialer.connect():        │
   │                       │                        │                          │  resolve → egress.Policy │
   │                       │                        │                          │  .allowsTarget() per addr│
   │                       │                        │                          │  → TCP connect ──────────▶│
@@ -513,7 +514,7 @@ anyone needing IPv6 resolution against specific nameservers must currently
 use `.system` instead (i.e. leave `dns_servers` empty and rely on
 `/etc/resolv.conf`).
 
-**Failure handling.** `resolver.connect` (the shared entry point both
+**Failure handling.** `dialer.connect` (the shared entry point both
 `forward.zig` and `tunnel.zig` call) resolves up to 16 candidate addresses
 into a stack buffer, then tries each one in order against the egress
 policy and a TCP connect:
@@ -642,7 +643,7 @@ defaults](README.md#security-defaults)).
 values and CONNECT ports, and knows nothing about resolvers, sockets, or
 config file parsing. Two things call into it:
 
-- **`resolver.connect`** (`resolver.zig`) applies `Policy.allowsTarget` to
+- **`dialer.connect`** (`dialer.zig`) applies `Policy.allowsTarget` to
   every address returned by DNS resolution, *before* attempting a TCP
   connect, and only to that resolved list — never to the hostname string
   itself. Checking the hostname would be bypassable by DNS rebinding: an
